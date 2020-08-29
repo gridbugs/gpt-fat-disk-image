@@ -27,7 +27,6 @@ pub const REQUIRED_SIGNATURE: u16 = 0xAA55;
 impl<'a> Mbr<'a> {
     pub fn from_logical_block(logical_block: &'a [u8]) -> Result<Self, InvalidSignature> {
         use std::convert::TryInto;
-        use std::mem;
         pub const BOOT_CODE_SIZE: usize = 440;
         const UNIQUE_MBR_SIGNATURE_OFFSET: usize = BOOT_CODE_SIZE;
         const PARTITION_RECORD_OFFSET: usize = 446;
@@ -35,8 +34,7 @@ impl<'a> Mbr<'a> {
         const SIGNATURE_OFFSET: usize = 510;
         let boot_code = &logical_block[0..BOOT_CODE_SIZE];
         let unique_mbr_disk_signature = u32::from_le_bytes(
-            logical_block[UNIQUE_MBR_SIGNATURE_OFFSET
-                ..(UNIQUE_MBR_SIGNATURE_OFFSET + mem::size_of::<u32>())]
+            logical_block[UNIQUE_MBR_SIGNATURE_OFFSET..(UNIQUE_MBR_SIGNATURE_OFFSET + 4)]
                 .try_into()
                 .unwrap(),
         );

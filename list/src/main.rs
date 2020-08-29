@@ -32,4 +32,5 @@ fn main() {
         buf
     };
     println!("{}", mini_gpt::read_mbr(&image_file_bytes).unwrap());
+    println!("{}", mini_gpt::read_gpt_header(&image_file_bytes).unwrap());
 }
