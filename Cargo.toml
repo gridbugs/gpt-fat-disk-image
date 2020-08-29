@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "create",
+    "list",
+    "mini-gpt",
+    "mini-fat32",
+]
