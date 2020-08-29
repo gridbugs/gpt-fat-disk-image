@@ -1,3 +1,4 @@
+mod crc32;
 pub mod gpt_header;
 pub mod mbr;
 
@@ -15,6 +16,6 @@ pub fn read_mbr(raw: &[u8]) -> Result<Mbr, mbr::InvalidSignature> {
     Mbr::from_logical_block(nth_logical_block(raw, 0))
 }
 
-pub fn read_gpt_header(raw: &[u8]) -> Result<GptHeader, gpt_header::Error> {
+pub fn read_gpt_header(raw: &[u8]) -> Result<GptHeader, gpt_header::ContentError> {
     GptHeader::from_logical_block(nth_logical_block(raw, 1))
 }
