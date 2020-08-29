@@ -103,7 +103,7 @@ impl GptHeader {
 
 impl fmt::Display for GptHeader {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        writeln!(f, "{:#X?}", self)?;
+        write!(f, "{:#X?}", self)?;
         Ok(())
     }
 }

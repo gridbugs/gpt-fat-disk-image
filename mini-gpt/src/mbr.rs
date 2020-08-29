@@ -82,10 +82,10 @@ impl<'a> Mbr<'a> {
 impl<'a> fmt::Display for Mbr<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         writeln!(f, "Boot Code:")?;
-        mini_hex_dump::display_bytes(self.boot_code, 32, f)?;
+        mini_hex_dump::display_bytes(self.boot_code, 16, f)?;
         writeln!(f, "Disk Signature: {:X}", self.unique_mbr_disk_signature)?;
         writeln!(f, "Partition Record:\n{:#X?}", self.partition_record)?;
-        writeln!(f, "Signature: {:X}", self.signature)?;
+        write!(f, "Signature: {:X}", self.signature)?;
         Ok(())
     }
 }

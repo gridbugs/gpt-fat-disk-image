@@ -1,3 +1,5 @@
+use mini_gpt::GptDisk;
+
 struct Args {
     image_filename: String,
 }
@@ -31,6 +33,16 @@ fn main() {
             .expect("unable to read file");
         buf
     };
-    println!("{}", mini_gpt::read_mbr(&image_file_bytes).unwrap());
-    println!("{}", mini_gpt::read_gpt_header(&image_file_bytes).unwrap());
+    let disk = GptDisk::new(&image_file_bytes).unwrap();
+    let first_used_partition_index = disk
+        .metadata()
+        .partition_entries()
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.is_used())
+        .map(|(index, _)| index);
+    if let Some(first_used_partition_index) = first_used_partition_index {
+        let partition_data = disk.nth_partition_data(first_used_partition_index).unwrap();
+        println!("{}", partition_data);
+    }
 }
