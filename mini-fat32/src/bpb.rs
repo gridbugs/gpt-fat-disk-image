@@ -56,7 +56,8 @@ pub struct BpbFat32 {
 
 #[derive(Debug)]
 pub enum Bpb {
-    Fat12OrFat16(BpbFat12OrFat16),
+    Fat12(BpbFat12OrFat16),
+    Fat16(BpbFat12OrFat16),
     Fat32(BpbFat32),
 }
 
@@ -71,7 +72,12 @@ pub enum BpbError {
         total_sectors_16: u16,
         total_sectors_32: u32,
     },
+    ExactlyOneFatSizeMustBeZero {
+        fat_size_16: u16,
+        fat_size_32: u32,
+    },
     InvalidSignature(u16),
+    TooManyClustersForNonFat32Header,
 }
 
 impl BpbGeneral {
@@ -91,6 +97,12 @@ impl BpbGeneral {
         let num_heads = u16::from_le_bytes(raw[26..28].try_into().unwrap());
         let hidden_sectors = u32::from_le_bytes(raw[28..32].try_into().unwrap());
         let total_sectors_32 = u32::from_le_bytes(raw[32..36].try_into().unwrap());
+        if (total_sectors_16 == 0) == (total_sectors_32 == 0) {
+            return Err(BpbError::ExactlyOneTotalSectorsFieldMustBeZero {
+                total_sectors_16,
+                total_sectors_32,
+            });
+        };
         Ok(Self {
             jmp_boot,
             oem_name,
@@ -107,6 +119,32 @@ impl BpbGeneral {
             hidden_sectors,
             total_sectors_32,
         })
+    }
+
+    pub fn total_sectors(&self) -> u32 {
+        if self.total_sectors_16 != 0 && self.total_sectors_32 == 0 {
+            self.total_sectors_16 as u32
+        } else {
+            assert!(self.total_sectors_16 == 0 && self.total_sectors_32 != 0);
+            self.total_sectors_32
+        }
+    }
+
+    pub fn count_of_clusters(&self, fat_size: u32, total_sectors: u32) -> u32 {
+        let root_dir_sectors = ((self.root_entry_count as u32 * 32)
+            + (self.bytes_per_sector as u32 - 1))
+            / self.bytes_per_sector as u32;
+        let fat_size = self.fat_size_16 as u32;
+        let total_sectors = if self.total_sectors_16 != 0 {
+            self.total_sectors_16 as u32
+        } else {
+            self.total_sectors_32
+        };
+        let data_sectors = total_sectors
+            - (self.reserved_sector_count as u32
+                + (self.num_fats as u32 * fat_size)
+                + root_dir_sectors);
+        data_sectors / self.sectors_per_cluster as u32
     }
 }
 
@@ -179,20 +217,49 @@ impl BpbFat32Specific {
     }
 }
 
+impl BpbFat12OrFat16 {
+    fn new(general: BpbGeneral, specific: BpbFat12OrFat16Specific) -> Result<Self, BpbError> {
+        if general.fat_size_16 == 0 {
+            return Err(BpbError::ExactlyOneFatSizeMustBeZero {
+                fat_size_16: 0,
+                fat_size_32: 0,
+            });
+        }
+        Ok(Self { general, specific })
+    }
+    fn into_bpb(self) -> Result<Bpb, BpbError> {
+        let fat_size = self.general.fat_size_16 as u32;
+        let total_sectors = if self.general.total_sectors_16 != 0 {
+            self.general.total_sectors_16 as u32
+        } else {
+            self.general.total_sectors_32
+        };
+        let count_of_clusters = self.general.count_of_clusters(fat_size, total_sectors);
+        if count_of_clusters < 4085 {
+            Ok(Bpb::Fat12(self))
+        } else if count_of_clusters < 65525 {
+            Ok(Bpb::Fat16(self))
+        } else {
+            Err(BpbError::TooManyClustersForNonFat32Header)
+        }
+    }
+}
+
 impl Bpb {
     pub(crate) fn new(raw: &[u8]) -> Result<Self, BpbError> {
         let general = BpbGeneral::new(raw)?;
-        if general.total_sectors_16 != 0 && general.total_sectors_32 == 0 {
+        if general.total_sectors_16 != 0 {
             let specific = BpbFat12OrFat16Specific::new(raw)?;
-            Ok(Bpb::Fat12OrFat16(BpbFat12OrFat16 { general, specific }))
-        } else if general.total_sectors_16 == 0 && general.total_sectors_32 != 0 {
-            let specific = BpbFat32Specific::new(raw)?;
-            Ok(Bpb::Fat32(BpbFat32 { general, specific }))
+            BpbFat12OrFat16::new(general, specific)?.into_bpb()
         } else {
-            Err(BpbError::ExactlyOneTotalSectorsFieldMustBeZero {
-                total_sectors_16: general.total_sectors_16,
-                total_sectors_32: general.total_sectors_32,
-            })
+            let specific = BpbFat32Specific::new(raw)?;
+            if general.fat_size_16 != 0 {
+                return Err(BpbError::ExactlyOneFatSizeMustBeZero {
+                    fat_size_16: general.fat_size_16,
+                    fat_size_32: specific.fat_size_32,
+                });
+            }
+            Ok(Bpb::Fat32(BpbFat32 { general, specific }))
         }
     }
 }
