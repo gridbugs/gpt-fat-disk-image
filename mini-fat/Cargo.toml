@@ -1,5 +1,5 @@
 [package]
-name = "mini_fat32"
+name = "mini_fat"
 version = "0.1.0"
 authors = ["Stephen Sherratt <stephen@sherra.tt>"]
 edition = "2018"

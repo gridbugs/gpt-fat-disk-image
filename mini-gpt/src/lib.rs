@@ -83,12 +83,12 @@ impl<'a> GptMetadata<'a> {
     }
 }
 
-pub struct GptDisk<'a> {
+pub struct Gpt<'a> {
     raw: &'a [u8],
     metadata: GptMetadata<'a>,
 }
 
-impl<'a> GptDisk<'a> {
+impl<'a> Gpt<'a> {
     pub fn new(raw: &'a [u8]) -> Result<Self, GptMetadataError> {
         Ok(Self {
             raw,

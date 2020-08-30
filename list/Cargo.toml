@@ -7,4 +7,4 @@ edition = "2018"
 [dependencies]
 simon = "0.4"
 mini_gpt = { version = "0.1", path = "../mini-gpt" }
-mini_fat32 = { version = "0.1", path = "../mini-fat32" }
+mini_fat = { version = "0.1", path = "../mini-fat" }

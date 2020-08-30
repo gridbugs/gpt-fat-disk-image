@@ -1,5 +1,5 @@
-use mini_fat32::Fat32;
-use mini_gpt::GptDisk;
+use mini_fat::Fat;
+use mini_gpt::Gpt;
 
 struct Args {
     image_filename: String,
@@ -34,8 +34,8 @@ fn main() {
             .expect("unable to read file");
         buf
     };
-    let disk = GptDisk::new(&image_file_bytes).unwrap();
-    let first_used_partition_index = disk
+    let gpt = Gpt::new(&image_file_bytes).unwrap();
+    let first_used_partition_index = gpt
         .metadata()
         .partition_entries()
         .iter()
@@ -43,9 +43,9 @@ fn main() {
         .find(|(_, entry)| entry.is_used())
         .map(|(index, _)| index);
     if let Some(first_used_partition_index) = first_used_partition_index {
-        let partition_data = disk.nth_partition_data(first_used_partition_index).unwrap();
-        let fat32 = Fat32::new(partition_data.raw).unwrap();
-        println!("{:#X?}", fat32.bpb());
+        let partition_data = gpt.nth_partition_data(first_used_partition_index).unwrap();
+        let fat = Fat::new(partition_data.raw).unwrap();
+        println!("{:#X?}", fat.bpb());
         //println!("{}", partition_data);
     }
 }

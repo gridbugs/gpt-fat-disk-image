@@ -4,6 +4,6 @@ members = [
     "create",
     "list",
     "mini-gpt",
-    "mini-fat32",
+    "mini-fat",
     "mini-hex-dump",
 ]

@@ -7,12 +7,12 @@ pub enum Error {
     Bpb(BpbError),
 }
 
-pub struct Fat32<'a> {
+pub struct Fat<'a> {
     raw: &'a [u8],
     bpb: Bpb,
 }
 
-impl<'a> Fat32<'a> {
+impl<'a> Fat<'a> {
     pub fn new(raw: &'a [u8]) -> Result<Self, Error> {
         let bpb = Bpb::new(raw).map_err(Error::Bpb)?;
         Ok(Self { raw, bpb })
