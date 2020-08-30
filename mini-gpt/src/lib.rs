@@ -20,6 +20,7 @@ fn nth_logical_block_raw(raw: &[u8], n: usize) -> &[u8] {
     &raw[base..(base + LOGICAL_BLOCK_SIZE)]
 }
 
+#[derive(Debug)]
 pub struct GptMetadata<'a> {
     mbr: Mbr<'a>,
     header: GptHeader,

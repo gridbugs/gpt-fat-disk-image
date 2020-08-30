@@ -2,7 +2,7 @@ use std::fmt;
 
 pub const PARTITION_RECORD_COUNT: usize = 4;
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug)]
 pub struct Mbr<'a> {
     pub boot_code: &'a [u8],
     pub unique_mbr_disk_signature: u32,

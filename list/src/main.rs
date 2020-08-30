@@ -1,3 +1,4 @@
+use mini_fat32::Fat32;
 use mini_gpt::GptDisk;
 
 struct Args {
@@ -43,6 +44,8 @@ fn main() {
         .map(|(index, _)| index);
     if let Some(first_used_partition_index) = first_used_partition_index {
         let partition_data = disk.nth_partition_data(first_used_partition_index).unwrap();
-        println!("{}", partition_data);
+        let fat32 = Fat32::new(partition_data.raw).unwrap();
+        println!("{:#X?}", fat32.bpb());
+        //println!("{}", partition_data);
     }
 }

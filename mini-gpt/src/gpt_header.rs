@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct GptHeader {
     pub signature: u64,
     pub revision: u32,
