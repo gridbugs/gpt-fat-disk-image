@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpt-fat32-disk-image-create"
+name = "gpt-fat-disk-image-create"
 version = "0.1.0"
 dependencies = [
  "mini_fat",
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpt-fat32-disk-image-list"
+name = "gpt-fat-disk-image-list"
 version = "0.1.0"
 dependencies = [
  "mini_fat",
