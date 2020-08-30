@@ -45,7 +45,11 @@ fn main() {
     if let Some(first_used_partition_index) = first_used_partition_index {
         let partition_data = gpt.nth_partition_data(first_used_partition_index).unwrap();
         let fat = Fat::new(partition_data.raw).unwrap();
+        let root_directory = fat.root_directory();
         println!("{:#X?}", fat.bpb());
+        for e in root_directory.entries() {
+            println!("{}", e.short_filename);
+        }
         //println!("{}", partition_data);
     }
 }

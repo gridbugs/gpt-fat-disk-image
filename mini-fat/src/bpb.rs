@@ -1,3 +1,5 @@
+use crate::directory::{Directory, DIRECTORY_ENTRY_BYTES};
+
 #[derive(Debug)]
 pub struct BpbGeneral {
     pub jmp_boot: [u8; 3],
@@ -130,11 +132,10 @@ impl BpbGeneral {
         }
     }
 
-    pub fn count_of_clusters(&self, fat_size: u32, total_sectors: u32) -> u32 {
+    fn count_of_clusters(&self, fat_size: u32) -> u32 {
         let root_dir_sectors = ((self.root_entry_count as u32 * 32)
             + (self.bytes_per_sector as u32 - 1))
             / self.bytes_per_sector as u32;
-        let fat_size = self.fat_size_16 as u32;
         let total_sectors = if self.total_sectors_16 != 0 {
             self.total_sectors_16 as u32
         } else {
@@ -229,12 +230,7 @@ impl BpbFat12OrFat16 {
     }
     fn into_bpb(self) -> Result<Bpb, BpbError> {
         let fat_size = self.general.fat_size_16 as u32;
-        let total_sectors = if self.general.total_sectors_16 != 0 {
-            self.general.total_sectors_16 as u32
-        } else {
-            self.general.total_sectors_32
-        };
-        let count_of_clusters = self.general.count_of_clusters(fat_size, total_sectors);
+        let count_of_clusters = self.general.count_of_clusters(fat_size);
         if count_of_clusters < 4085 {
             Ok(Bpb::Fat12(self))
         } else if count_of_clusters < 65525 {
@@ -260,6 +256,23 @@ impl Bpb {
                 });
             }
             Ok(Bpb::Fat32(BpbFat32 { general, specific }))
+        }
+    }
+
+    pub fn root_directory(&self, raw: &[u8]) -> Directory {
+        match self {
+            Self::Fat32(_) => todo!(),
+            Self::Fat16(f) | Self::Fat12(f) => {
+                let root_directory_sector = f.general.reserved_sector_count as usize
+                    + (f.general.num_fats as usize * f.general.fat_size_16 as usize);
+                let root_directory_start_index =
+                    root_directory_sector * f.general.bytes_per_sector as usize;
+                let root_directory_end_index = root_directory_start_index
+                    + (f.general.root_entry_count as usize * DIRECTORY_ENTRY_BYTES);
+                Directory::from_contiguous(
+                    &raw[root_directory_start_index..root_directory_end_index],
+                )
+            }
         }
     }
 }

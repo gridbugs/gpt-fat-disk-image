@@ -1,6 +1,8 @@
 mod bpb;
+mod directory;
 
 pub use bpb::{Bpb, BpbError};
+pub use directory::Directory;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
@@ -20,5 +22,9 @@ impl<'a> Fat<'a> {
 
     pub fn bpb(&self) -> &Bpb {
         &self.bpb
+    }
+
+    pub fn root_directory(&self) -> Directory {
+        self.bpb.root_directory(self.raw)
     }
 }
