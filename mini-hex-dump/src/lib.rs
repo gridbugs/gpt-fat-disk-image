@@ -29,3 +29,12 @@ pub fn display_bytes(
     }
     Ok(())
 }
+
+pub struct Bytes<'a>(pub &'a [u8]);
+
+impl<'a> fmt::Display for Bytes<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        display_bytes(self.0, 16, f)?;
+        Ok(())
+    }
+}

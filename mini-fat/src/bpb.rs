@@ -259,6 +259,96 @@ impl Bpb {
         }
     }
 
+    fn general(&self) -> &BpbGeneral {
+        match self {
+            Self::Fat32(f) => &f.general,
+            Self::Fat16(f) | Self::Fat12(f) => &f.general,
+        }
+    }
+
+    fn fat_size_in_sectors(&self) -> u32 {
+        match self {
+            Self::Fat32(f) => f.specific.fat_size_32,
+            Self::Fat16(f) | Self::Fat12(f) => f.general.fat_size_16 as u32,
+        }
+    }
+
+    fn count_of_clusters(&self) -> u32 {
+        self.general().count_of_clusters(self.fat_size_in_sectors())
+    }
+
+    pub fn maximum_valid_cluster(&self) -> u32 {
+        self.count_of_clusters() + 1
+    }
+
+    fn fat_start_byte_offset_range(&self) -> std::ops::Range<usize> {
+        let start = self.general().reserved_sector_count as usize
+            * self.general().bytes_per_sector as usize;
+        let end = start
+            + (self.fat_size_in_sectors() as usize * self.general().bytes_per_sector as usize);
+        start..end
+    }
+
+    pub fn fat_raw<'a>(&self, raw: &'a [u8]) -> &'a [u8] {
+        &raw[self.fat_start_byte_offset_range()]
+    }
+
+    pub fn fat_entry_of_nth_cluster(&self, n: u32, fat_raw: &[u8]) -> u32 {
+        assert!(n >= 2);
+        use std::convert::TryInto;
+        match self {
+            Self::Fat32(_) => {
+                let base = n as usize * 4;
+                u32::from_le_bytes(fat_raw[base..(base + 4)].try_into().unwrap())
+            }
+            Self::Fat16(_) => {
+                let base = n as usize * 2;
+                u16::from_le_bytes(fat_raw[base..(base + 2)].try_into().unwrap()) as u32
+            }
+            Self::Fat12(_) => {
+                let base = n as usize + (n as usize / 2);
+                let entry16 = u16::from_le_bytes(fat_raw[base..(base + 2)].try_into().unwrap());
+                if n & 1 == 0 {
+                    (entry16 & 0xFFF) as u32
+                } else {
+                    (entry16 >> 4) as u32
+                }
+            }
+        }
+    }
+
+    fn root_directory_num_bytes(&self) -> usize {
+        match self {
+            Self::Fat32(_) => 0,
+            Self::Fat16(f) | Self::Fat12(f) => {
+                f.general.root_entry_count as usize * DIRECTORY_ENTRY_BYTES
+            }
+        }
+    }
+
+    pub fn clusters_raw<'a>(&self, raw: &'a [u8]) -> &'a [u8] {
+        let start = ((self.general().reserved_sector_count as usize
+            + self.fat_size_in_sectors() as usize * self.general().num_fats as usize)
+            * self.general().bytes_per_sector as usize)
+            + self.root_directory_num_bytes();
+        &raw[start..]
+    }
+
+    pub fn bytes_per_cluster(&self) -> usize {
+        self.general().bytes_per_sector as usize * self.general().sectors_per_cluster as usize
+    }
+
+    pub fn data_of_nth_cluster<'a>(&self, n: u32, clusters_raw: &'a [u8]) -> &'a [u8] {
+        assert!(n >= 2);
+        let start = (n as usize - 2) * self.bytes_per_cluster();
+        let end = start + self.bytes_per_cluster();
+        &clusters_raw[start..end]
+    }
+
+    pub fn directory_in_nth_cluster_tmp(&self, n: u32, clusters_raw: &[u8]) -> Directory {
+        Directory::from_contiguous(self.data_of_nth_cluster(n, clusters_raw))
+    }
+
     pub fn root_directory(&self, raw: &[u8]) -> Directory {
         match self {
             Self::Fat32(_) => todo!(),

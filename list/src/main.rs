@@ -1,5 +1,5 @@
-use mini_fat::Fat;
-use mini_gpt::Gpt;
+use mini_fat::FatReader;
+use mini_gpt::GptReader;
 
 struct Args {
     image_filename: String,
@@ -34,7 +34,7 @@ fn main() {
             .expect("unable to read file");
         buf
     };
-    let gpt = Gpt::new(&image_file_bytes).unwrap();
+    let gpt = GptReader::new(&image_file_bytes).unwrap();
     let first_used_partition_index = gpt
         .metadata()
         .partition_entries()
@@ -44,11 +44,20 @@ fn main() {
         .map(|(index, _)| index);
     if let Some(first_used_partition_index) = first_used_partition_index {
         let partition_data = gpt.nth_partition_data(first_used_partition_index).unwrap();
-        let fat = Fat::new(partition_data.raw).unwrap();
+        let fat = FatReader::new(partition_data.raw).unwrap();
         let root_directory = fat.root_directory();
         println!("{:#X?}", fat.bpb());
+        println!("max valid cluster: {:X}", fat.maximum_valid_cluster());
+        println!("{}", mini_hex_dump::Bytes(fat.fat_raw()));
         for e in root_directory.entries() {
-            println!("{}", e.short_filename);
+            println!("{} {} {}", e.short_filename, e.first_cluster, e.file_size);
+        }
+        println!("fat entry: {:X}", fat.fat_entry_of_nth_cluster(3));
+        for e in fat.directory_in_nth_cluster_tmp(3).entries() {
+            println!("{} {} {}", e.short_filename, e.first_cluster, e.file_size);
+        }
+        for e in fat.directory_in_nth_cluster_tmp(4).entries() {
+            println!("{} {} {}", e.short_filename, e.first_cluster, e.file_size);
         }
         //println!("{}", partition_data);
     }

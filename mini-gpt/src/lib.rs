@@ -83,12 +83,12 @@ impl<'a> GptMetadata<'a> {
     }
 }
 
-pub struct Gpt<'a> {
+pub struct GptReader<'a> {
     raw: &'a [u8],
     metadata: GptMetadata<'a>,
 }
 
-impl<'a> Gpt<'a> {
+impl<'a> GptReader<'a> {
     pub fn new(raw: &'a [u8]) -> Result<Self, GptMetadataError> {
         Ok(Self {
             raw,

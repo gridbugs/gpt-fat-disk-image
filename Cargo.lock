@@ -24,12 +24,16 @@ version = "0.1.0"
 dependencies = [
  "mini_fat",
  "mini_gpt",
+ "mini_hex_dump",
  "simon",
 ]
 
 [[package]]
 name = "mini_fat"
 version = "0.1.0"
+dependencies = [
+ "mini_hex_dump",
+]
 
 [[package]]
 name = "mini_gpt"
