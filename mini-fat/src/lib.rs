@@ -37,11 +37,11 @@ impl<'a> FatReader<'a> {
     }
 
     pub fn fat_entry_of_nth_cluster(&self, n: u32) -> u32 {
-        self.bpb.fat_entry_of_nth_cluster(n, self.fat_raw())
+        self.bpb.fat_entry_of_nth_cluster(self.fat_raw(), n)
     }
 
     pub fn directory_in_nth_cluster_tmp(&self, n: u32) -> Directory {
         self.bpb
-            .directory_in_nth_cluster_tmp(n, self.bpb.clusters_raw(self.raw))
+            .directory_in_nth_cluster_tmp(self.bpb.clusters_raw(self.raw), n)
     }
 }

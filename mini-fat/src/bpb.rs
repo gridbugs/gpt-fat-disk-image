@@ -293,28 +293,8 @@ impl Bpb {
         &raw[self.fat_start_byte_offset_range()]
     }
 
-    pub fn fat_entry_of_nth_cluster(&self, n: u32, fat_raw: &[u8]) -> u32 {
-        assert!(n >= 2);
-        use std::convert::TryInto;
-        match self {
-            Self::Fat32(_) => {
-                let base = n as usize * 4;
-                u32::from_le_bytes(fat_raw[base..(base + 4)].try_into().unwrap())
-            }
-            Self::Fat16(_) => {
-                let base = n as usize * 2;
-                u16::from_le_bytes(fat_raw[base..(base + 2)].try_into().unwrap()) as u32
-            }
-            Self::Fat12(_) => {
-                let base = n as usize + (n as usize / 2);
-                let entry16 = u16::from_le_bytes(fat_raw[base..(base + 2)].try_into().unwrap());
-                if n & 1 == 0 {
-                    (entry16 & 0xFFF) as u32
-                } else {
-                    (entry16 >> 4) as u32
-                }
-            }
-        }
+    pub fn fat_entry_of_nth_cluster(&self, fat_raw: &[u8], n: u32) -> u32 {
+        fat_entry_of_nth_cluster(self.fat_type(), fat_raw, n)
     }
 
     fn root_directory_num_bytes(&self) -> usize {
@@ -338,15 +318,15 @@ impl Bpb {
         self.general().bytes_per_sector as usize * self.general().sectors_per_cluster as usize
     }
 
-    pub fn data_of_nth_cluster<'a>(&self, n: u32, clusters_raw: &'a [u8]) -> &'a [u8] {
+    pub fn data_of_nth_cluster<'a>(&self, clusters_raw: &'a [u8], n: u32) -> &'a [u8] {
         assert!(n >= 2);
         let start = (n as usize - 2) * self.bytes_per_cluster();
         let end = start + self.bytes_per_cluster();
         &clusters_raw[start..end]
     }
 
-    pub fn directory_in_nth_cluster_tmp(&self, n: u32, clusters_raw: &[u8]) -> Directory {
-        Directory::from_contiguous(self.data_of_nth_cluster(n, clusters_raw))
+    pub fn directory_in_nth_cluster_tmp(&self, clusters_raw: &[u8], n: u32) -> Directory {
+        Directory::from_contiguous(self.data_of_nth_cluster(clusters_raw, n))
     }
 
     pub fn root_directory(&self, raw: &[u8]) -> Directory {
@@ -362,6 +342,91 @@ impl Bpb {
                 Directory::from_contiguous(
                     &raw[root_directory_start_index..root_directory_end_index],
                 )
+            }
+        }
+    }
+
+    fn fat_type(&self) -> FatType {
+        match self {
+            Self::Fat12(_) => FatType::Fat12,
+            Self::Fat16(_) => FatType::Fat16,
+            Self::Fat32(_) => FatType::Fat32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FatType {
+    Fat12,
+    Fat16,
+    Fat32,
+}
+
+impl FatType {
+    fn fat_entry_defective(self) -> u32 {
+        match self {
+            Self::Fat12 => 0xFF7,
+            Self::Fat16 => 0xFFF7,
+            Self::Fat32 => 0xFFFFFFF7,
+        }
+    }
+}
+
+fn fat_entry_of_nth_cluster(fat_type: FatType, fat_raw: &[u8], n: u32) -> u32 {
+    assert!(n >= 2);
+    use std::convert::TryInto;
+    match fat_type {
+        FatType::Fat32 => {
+            let base = n as usize * 4;
+            u32::from_le_bytes(fat_raw[base..(base + 4)].try_into().unwrap())
+        }
+        FatType::Fat16 => {
+            let base = n as usize * 2;
+            u16::from_le_bytes(fat_raw[base..(base + 2)].try_into().unwrap()) as u32
+        }
+        FatType::Fat12 => {
+            let base = n as usize + (n as usize / 2);
+            let entry16 = u16::from_le_bytes(fat_raw[base..(base + 2)].try_into().unwrap());
+            if n & 1 == 0 {
+                (entry16 & 0xFFF) as u32
+            } else {
+                (entry16 >> 4) as u32
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FatLookupError {
+    FreeCluster,
+    DefectiveCluster,
+    UnspecifiedEntryOne,
+    ReservedEntry,
+}
+
+enum FileFatEntry {
+    AllocatedCluster(u32),
+    EndOfFile,
+}
+
+fn file_fat_entry_of_nth_cluster(
+    fat_type: FatType,
+    fat_raw: &[u8],
+    n: u32,
+    maximum_valid_cluster: u32,
+) -> Result<FileFatEntry, FatLookupError> {
+    match fat_entry_of_nth_cluster(fat_type, fat_raw, n) {
+        0 => Err(FatLookupError::FreeCluster),
+        1 => Err(FatLookupError::UnspecifiedEntryOne),
+        entry => {
+            if entry <= maximum_valid_cluster {
+                Ok(FileFatEntry::AllocatedCluster(entry))
+            } else if entry < fat_type.fat_entry_defective() {
+                Err(FatLookupError::ReservedEntry)
+            } else if entry == fat_type.fat_entry_defective() {
+                Err(FatLookupError::DefectiveCluster)
+            } else {
+                Ok(FileFatEntry::EndOfFile)
             }
         }
     }
