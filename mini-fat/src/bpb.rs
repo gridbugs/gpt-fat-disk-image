@@ -325,13 +325,39 @@ impl Bpb {
         &clusters_raw[start..end]
     }
 
+    pub fn data_starting_at_nth_cluster_cluster_iter<'a>(
+        &'a self,
+        fat_raw: &'a [u8],
+        clusters_raw: &'a [u8],
+        n: u32,
+    ) -> impl 'a + Iterator<Item = &'a [u8]> {
+        FatClusterIndexIter {
+            fat_type: self.fat_type(),
+            fat_raw,
+            maximum_valid_cluster: self.maximum_valid_cluster(),
+            current_entry: n,
+        }
+        .map(move |cluster_index_result| {
+            self.data_of_nth_cluster(clusters_raw, cluster_index_result.unwrap())
+        })
+    }
+
     pub fn directory_in_nth_cluster_tmp(&self, clusters_raw: &[u8], n: u32) -> Directory {
         Directory::from_contiguous(self.data_of_nth_cluster(clusters_raw, n))
     }
 
     pub fn root_directory(&self, raw: &[u8]) -> Directory {
         match self {
-            Self::Fat32(_) => todo!(),
+            Self::Fat32(f) => {
+                let fat_raw = self.fat_raw(raw);
+                let clusters_raw = self.clusters_raw(raw);
+                let iter = self.data_starting_at_nth_cluster_cluster_iter(
+                    fat_raw,
+                    clusters_raw,
+                    f.specific.root_cluster,
+                );
+                Directory::from_cluster_into_iter(iter)
+            }
             Self::Fat16(f) | Self::Fat12(f) => {
                 let root_directory_sector = f.general.reserved_sector_count as usize
                     + (f.general.num_fats as usize * f.general.fat_size_16 as usize);
@@ -367,7 +393,15 @@ impl FatType {
         match self {
             Self::Fat12 => 0xFF7,
             Self::Fat16 => 0xFFF7,
-            Self::Fat32 => 0xFFFFFFF7,
+            Self::Fat32 => 0x0FFFFFF7,
+        }
+    }
+
+    fn fat_entry_end_of_file(self) -> u32 {
+        match self {
+            Self::Fat12 => 0xFFF,
+            Self::Fat16 => 0xFFFF,
+            Self::Fat32 => 0xFFFFFFFF,
         }
     }
 }
@@ -378,7 +412,7 @@ fn fat_entry_of_nth_cluster(fat_type: FatType, fat_raw: &[u8], n: u32) -> u32 {
     match fat_type {
         FatType::Fat32 => {
             let base = n as usize * 4;
-            u32::from_le_bytes(fat_raw[base..(base + 4)].try_into().unwrap())
+            u32::from_le_bytes(fat_raw[base..(base + 4)].try_into().unwrap()) & 0x0FFFFFFF
         }
         FatType::Fat16 => {
             let base = n as usize * 2;
@@ -409,13 +443,12 @@ enum FileFatEntry {
     EndOfFile,
 }
 
-fn file_fat_entry_of_nth_cluster(
+fn classify_fat_entry(
     fat_type: FatType,
-    fat_raw: &[u8],
-    n: u32,
+    entry: u32,
     maximum_valid_cluster: u32,
 ) -> Result<FileFatEntry, FatLookupError> {
-    match fat_entry_of_nth_cluster(fat_type, fat_raw, n) {
+    match entry {
         0 => Err(FatLookupError::FreeCluster),
         1 => Err(FatLookupError::UnspecifiedEntryOne),
         entry => {
@@ -429,5 +462,33 @@ fn file_fat_entry_of_nth_cluster(
                 Ok(FileFatEntry::EndOfFile)
             }
         }
+    }
+}
+
+struct FatClusterIndexIter<'a> {
+    fat_type: FatType,
+    fat_raw: &'a [u8],
+    maximum_valid_cluster: u32,
+    current_entry: u32,
+}
+
+impl<'a> Iterator for FatClusterIndexIter<'a> {
+    type Item = Result<u32, FatLookupError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = match classify_fat_entry(
+            self.fat_type,
+            self.current_entry,
+            self.maximum_valid_cluster,
+        ) {
+            Err(e) => {
+                // set end of file so the iterator stops next time it's polled
+                self.current_entry = self.fat_type.fat_entry_end_of_file();
+                return Some(Err(e));
+            }
+            Ok(FileFatEntry::EndOfFile) => return None,
+            Ok(FileFatEntry::AllocatedCluster(index)) => index,
+        };
+        self.current_entry = fat_entry_of_nth_cluster(self.fat_type, self.fat_raw, index);
+        Some(Ok(index))
     }
 }

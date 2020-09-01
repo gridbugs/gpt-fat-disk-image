@@ -47,18 +47,8 @@ fn main() {
         let fat = FatReader::new(partition_data.raw).unwrap();
         let root_directory = fat.root_directory();
         println!("{:#X?}", fat.bpb());
-        println!("max valid cluster: {:X}", fat.maximum_valid_cluster());
-        println!("{}", mini_hex_dump::Bytes(fat.fat_raw()));
         for e in root_directory.entries() {
-            println!("{} {} {}", e.short_filename, e.first_cluster, e.file_size);
+            println!("{} {} {}", e.name(), e.first_cluster, e.file_size);
         }
-        println!("fat entry: {:X}", fat.fat_entry_of_nth_cluster(3));
-        for e in fat.directory_in_nth_cluster_tmp(3).entries() {
-            println!("{} {} {}", e.short_filename, e.first_cluster, e.file_size);
-        }
-        for e in fat.directory_in_nth_cluster_tmp(4).entries() {
-            println!("{} {} {}", e.short_filename, e.first_cluster, e.file_size);
-        }
-        //println!("{}", partition_data);
     }
 }
