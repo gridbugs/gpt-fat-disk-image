@@ -8,4 +8,3 @@ edition = "2018"
 simon = "0.4"
 mini_gpt = { version = "0.1", path = "../mini-gpt" }
 mini_fat = { version = "0.1", path = "../mini-fat" }
-mini_hex_dump = { version = "0.1", path = "../mini-hex-dump" }
