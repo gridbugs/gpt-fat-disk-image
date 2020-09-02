@@ -438,6 +438,10 @@ impl Directory {
     pub fn entries(&self) -> &[DirectoryEntry] {
         &self.entries
     }
+
+    pub fn find_entry(&self, name: &str) -> Option<&DirectoryEntry> {
+        self.entries.iter().find(|entry| entry.name() == name)
+    }
 }
 
 #[derive(Debug)]
@@ -538,6 +542,17 @@ impl<'a, H> Traverser<'a, H>
 where
     H: io::Seek + io::Read,
 {
+    fn new(handle: &'a mut H, buf: &'a mut Vec<u8>, bpb: &Bpb, partition_byte_start: u64) -> Self {
+        Traverser {
+            buf,
+            handle,
+            fat_start: partition_byte_start + bpb.fat_offset(),
+            data_start: partition_byte_start + bpb.data_offset(),
+            fat_type: bpb.fat_type(),
+            bytes_per_cluster: bpb.bytes_per_cluster(),
+            maximum_valid_cluster: bpb.maximum_valid_cluster(),
+        }
+    }
     fn traverse<'b>(&'b mut self, cluster_index: u32) -> Traverse<'a, 'b, H> {
         Traverse {
             traverser: self,
@@ -562,6 +577,9 @@ where
     where
         F: FnMut(&[u8]) -> Option<T>,
     {
+        self.traverser
+            .buf
+            .resize(self.traverser.bytes_per_cluster as usize, 0);
         loop {
             let entry = match classify_fat_entry(
                 self.traverser.fat_type,
@@ -597,47 +615,39 @@ where
     }
 }
 
-pub fn root_directory<H>(
-    handle: &mut H,
-    partition_byte_range: Range<u64>,
-) -> Result<Directory, Error>
+fn read_bpb<H>(handle: &mut H, partition_byte_start: u64, buf: &mut Vec<u8>) -> Result<Bpb, Error>
 where
     H: io::Seek + io::Read,
 {
-    let mut buf = vec![0; BPB_SIZE];
+    buf.resize(BPB_SIZE, 0);
     // seek to the start of the partition
     handle
-        .seek(io::SeekFrom::Start(partition_byte_range.start))
+        .seek(io::SeekFrom::Start(partition_byte_start))
         .map_err(Error::Io)?;
     // read the bpb
     handle
         .read_exact(&mut buf[0..BPB_SIZE])
         .map_err(Error::Io)?;
-    let bpb = Bpb::parse(&buf)?;
-    let fat_start = partition_byte_range.start + bpb.fat_offset();
-    let data_start = partition_byte_range.start + bpb.data_offset();
-    let bytes_per_cluster = bpb.bytes_per_cluster();
-    let fat_type = bpb.fat_type();
-    // resize to fit a cluster
-    buf.resize(bytes_per_cluster as usize, 0);
-    let mut traverser = Traverser {
-        buf: &mut buf,
-        handle,
-        fat_start,
-        data_start,
-        fat_type,
-        bytes_per_cluster,
-        maximum_valid_cluster: bpb.maximum_valid_cluster(),
-    };
-    match fat_type {
-        FatType::Fat32 => Directory::from_traverser(&mut traverser, bpb.root_cluster),
+    Bpb::parse(&buf)
+}
+
+fn read_root_directory<H>(
+    traverser: &mut Traverser<H>,
+    bpb: &Bpb,
+    partition_byte_start: u64,
+) -> Result<Directory, Error>
+where
+    H: io::Seek + io::Read,
+{
+    match traverser.fat_type {
+        FatType::Fat32 => Directory::from_traverser(traverser, bpb.root_cluster),
         FatType::Fat12 | FatType::Fat16 => {
             let root_directory_size = bpb.root_directory_size();
             traverser.buf.resize(root_directory_size, 0);
             traverser
                 .handle
                 .seek(io::SeekFrom::Start(
-                    partition_byte_range.start + bpb.root_directory_offset(),
+                    partition_byte_start + bpb.root_directory_offset(),
                 ))
                 .map_err(Error::Io)?;
             traverser
@@ -645,8 +655,39 @@ where
                 .read_exact(&mut traverser.buf[0..root_directory_size])
                 .map_err(Error::Io)?;
             let directory = Directory::from_contiguous(traverser.buf);
-            traverser.buf.resize(bytes_per_cluster as usize, 0);
             Ok(directory)
         }
+    }
+}
+
+pub fn root_directory<H>(
+    handle: &mut H,
+    partition_byte_range: Range<u64>,
+) -> Result<Directory, Error>
+where
+    H: io::Seek + io::Read,
+{
+    let mut buf = Vec::new();
+    let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
+    let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
+    read_root_directory(&mut traverser, &bpb, partition_byte_range.start)
+}
+pub fn read_file<H>(
+    handle: &mut H,
+    partition_byte_range: Range<u64>,
+    path: &str,
+) -> Result<Option<Vec<u8>>, Error>
+where
+    H: io::Seek + io::Read,
+{
+    let mut buf = Vec::new();
+    let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
+    let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
+    let root_directory = read_root_directory(&mut traverser, &bpb, partition_byte_range.start)?;
+    if let Some(entry) = root_directory.find_entry(path) {
+        println!("{:?}", entry);
+        todo!()
+    } else {
+        Ok(None)
     }
 }
