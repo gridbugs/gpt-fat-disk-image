@@ -18,6 +18,7 @@ pub enum Error {
     InvalidSignature(u16),
     InvalidFatEntry(u32),
     FatLookup(FatLookupError),
+    NoSuchFile,
 }
 
 #[derive(Debug)]
@@ -479,6 +480,18 @@ fn classify_fat_entry(
     }
 }
 
+fn handle_read<H>(handle: &mut H, offset: u64, size: usize, buf: &mut Vec<u8>) -> Result<(), Error>
+where
+    H: io::Seek + io::Read,
+{
+    buf.resize(size, 0);
+    handle
+        .seek(io::SeekFrom::Start(offset))
+        .map_err(Error::Io)?;
+    handle.read_exact(buf).map_err(Error::Io)?;
+    Ok(())
+}
+
 fn fat_entry_of_nth_cluster<H>(
     handle: &mut H,
     fat_type: FatType,
@@ -577,9 +590,6 @@ where
     where
         F: FnMut(&[u8]) -> Option<T>,
     {
-        self.traverser
-            .buf
-            .resize(self.traverser.bytes_per_cluster as usize, 0);
         loop {
             let entry = match classify_fat_entry(
                 self.traverser.fat_type,
@@ -593,14 +603,12 @@ where
             };
             let cluster_start = self.traverser.data_start
                 + (entry as u64 - 2) * self.traverser.bytes_per_cluster as u64;
-            self.traverser
-                .handle
-                .seek(io::SeekFrom::Start(cluster_start))
-                .map_err(Error::Io)?;
-            self.traverser
-                .handle
-                .read_exact(&mut self.traverser.buf[0..(self.traverser.bytes_per_cluster as usize)])
-                .map_err(Error::Io)?;
+            handle_read(
+                self.traverser.handle,
+                cluster_start,
+                self.traverser.bytes_per_cluster as usize,
+                &mut self.traverser.buf,
+            )?;
             if let Some(t) = f(&self.traverser.buf) {
                 break Ok(Some(t));
             }
@@ -613,21 +621,33 @@ where
             self.current_entry = next_entry;
         }
     }
+
+    fn write_data<O>(&mut self, size: u32, output: &mut O) -> Result<(), Error>
+    where
+        O: io::Write,
+    {
+        let mut remaining = size as usize;
+        let maybe_maybe_io_error = self.for_each(|data| {
+            if let Some(next_remaining) = remaining.checked_sub(data.len()) {
+                remaining = next_remaining;
+                output.write_all(data).err().map(Some)
+            } else {
+                Some(output.write_all(&data[0..remaining]).err())
+            }
+        })?;
+        if let Some(Some(io_error)) = maybe_maybe_io_error {
+            Err(Error::Io(io_error))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn read_bpb<H>(handle: &mut H, partition_byte_start: u64, buf: &mut Vec<u8>) -> Result<Bpb, Error>
 where
     H: io::Seek + io::Read,
 {
-    buf.resize(BPB_SIZE, 0);
-    // seek to the start of the partition
-    handle
-        .seek(io::SeekFrom::Start(partition_byte_start))
-        .map_err(Error::Io)?;
-    // read the bpb
-    handle
-        .read_exact(&mut buf[0..BPB_SIZE])
-        .map_err(Error::Io)?;
+    handle_read(handle, partition_byte_start, BPB_SIZE, buf)?;
     Bpb::parse(&buf)
 }
 
@@ -642,18 +662,12 @@ where
     match traverser.fat_type {
         FatType::Fat32 => Directory::from_traverser(traverser, bpb.root_cluster),
         FatType::Fat12 | FatType::Fat16 => {
-            let root_directory_size = bpb.root_directory_size();
-            traverser.buf.resize(root_directory_size, 0);
-            traverser
-                .handle
-                .seek(io::SeekFrom::Start(
-                    partition_byte_start + bpb.root_directory_offset(),
-                ))
-                .map_err(Error::Io)?;
-            traverser
-                .handle
-                .read_exact(&mut traverser.buf[0..root_directory_size])
-                .map_err(Error::Io)?;
+            handle_read(
+                traverser.handle,
+                partition_byte_start + bpb.root_directory_offset(),
+                bpb.root_directory_size(),
+                traverser.buf,
+            )?;
             let directory = Directory::from_contiguous(traverser.buf);
             Ok(directory)
         }
@@ -672,22 +686,26 @@ where
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
     read_root_directory(&mut traverser, &bpb, partition_byte_range.start)
 }
-pub fn read_file<H>(
+
+pub fn read_file<H, O>(
     handle: &mut H,
     partition_byte_range: Range<u64>,
     path: &str,
-) -> Result<Option<Vec<u8>>, Error>
+    output: &mut O,
+) -> Result<(), Error>
 where
     H: io::Seek + io::Read,
+    O: io::Write,
 {
     let mut buf = Vec::new();
     let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
     let root_directory = read_root_directory(&mut traverser, &bpb, partition_byte_range.start)?;
     if let Some(entry) = root_directory.find_entry(path) {
-        println!("{:?}", entry);
-        todo!()
+        traverser
+            .traverse(entry.first_cluster)
+            .write_data(entry.file_size, output)
     } else {
-        Ok(None)
+        Err(Error::NoSuchFile)
     }
 }
