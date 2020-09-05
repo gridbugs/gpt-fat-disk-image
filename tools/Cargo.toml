@@ -1,5 +1,5 @@
 [package]
-name = "gpt-fat-disk-image-create"
+name = "gpt-fat-disk-image-tools"
 version = "0.1.0"
 authors = ["Stephen Sherratt <stephen@sherra.tt>"]
 edition = "2018"
@@ -8,3 +8,11 @@ edition = "2018"
 simon = "0.4"
 mini_gpt = { version = "0.1", path = "../mini-gpt" }
 mini_fat = { version = "0.1", path = "../mini-fat" }
+
+[[bin]]
+name = "gpt-fat-disk-image-list"
+path = "src/list.rs"
+
+[[bin]]
+name = "gpt-fat-disk-image-read"
+path = "src/read.rs"

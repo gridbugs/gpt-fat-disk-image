@@ -1,9 +1,7 @@
 [workspace]
 
 members = [
-    "create",
-    "list",
-    "read",
+    "tools",
     "mini-gpt",
     "mini-fat",
 ]
