@@ -3,6 +3,12 @@ name = "gpt-fat-disk-image-tools"
 version = "0.1.0"
 authors = ["Stephen Sherratt <stephen@sherra.tt>"]
 edition = "2018"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/stevebob/gpt-fat-disk-image"
+repository = "https://github.com/stevebob/gpt-fat-disk-image"
+description = "Tools for reading disk images with GPT partition tables and FAT filesystems"
+
 
 [dependencies]
 simon = "0.4"

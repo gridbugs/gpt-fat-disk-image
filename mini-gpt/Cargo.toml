@@ -3,5 +3,12 @@ name = "mini_gpt"
 version = "0.1.0"
 authors = ["Stephen Sherratt <stephen@sherra.tt>"]
 edition = "2018"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/stevebob/gpt-fat-disk-image"
+repository = "https://github.com/stevebob/gpt-fat-disk-image"
+documentation = "https://docs.rs/mini_gpt"
+description = "Minimal GPT disk image decoder"
+
 
 [dependencies]
