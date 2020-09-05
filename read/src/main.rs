@@ -3,7 +3,7 @@ use std::io;
 
 struct Args {
     image_filename: String,
-    cat_filename: String,
+    read_filename: String,
     output: Box<dyn io::Write>,
 }
 
@@ -13,12 +13,12 @@ impl Args {
         (simon::args_map! {
             let {
                 image_filename = simon::opt("i", "image", "path to disk image", "PATH").required();
-                cat_filename = simon::opt("f", "file", "path within image of file to cat", "PATH").required();
+                read_filename = simon::opt("f", "file", "path within image of file to read", "PATH").required();
                 output = simon::opt::<String>("o", "output", "output file path (omit for stdout)", "PATH");
             } in {
                 Self {
                     image_filename,
-                    cat_filename,
+                    read_filename,
                     output: if let Some(path) = output {
                         Box::new(File::create(path).unwrap())
                     } else {
@@ -35,7 +35,7 @@ impl Args {
 fn main() {
     let Args {
         image_filename,
-        cat_filename,
+        read_filename,
         mut output,
     } = Args::parse();
     let mut image_file = File::open(image_filename).expect("unable to open file");
@@ -43,7 +43,7 @@ fn main() {
     mini_fat::read_file(
         &mut image_file,
         first_partition_byte_range,
-        cat_filename.as_str(),
+        read_filename.as_str(),
         &mut output,
     )
     .unwrap();

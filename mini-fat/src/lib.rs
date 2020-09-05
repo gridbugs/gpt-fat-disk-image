@@ -654,21 +654,17 @@ where
     Bpb::parse(&buf)
 }
 
-fn read_root_directory<H>(
-    traverser: &mut Traverser<H>,
-    bpb: &Bpb,
-    partition_byte_start: u64,
-) -> Result<Directory, Error>
+fn read_root_directory<H>(traverser: &mut Traverser<H>) -> Result<Directory, Error>
 where
     H: io::Seek + io::Read,
 {
     match traverser.bpb.fat_type() {
-        FatType::Fat32 => Directory::from_traverser(traverser, bpb.root_cluster),
+        FatType::Fat32 => Directory::from_traverser(traverser, traverser.bpb.root_cluster),
         FatType::Fat12 | FatType::Fat16 => {
             handle_read(
                 traverser.handle,
-                partition_byte_start + bpb.root_directory_offset(),
-                bpb.root_directory_size(),
+                traverser.partition_byte_start + traverser.bpb.root_directory_offset(),
+                traverser.bpb.root_directory_size(),
                 traverser.buf,
             )?;
             let directory = Directory::from_contiguous(traverser.buf);
@@ -677,22 +673,17 @@ where
     }
 }
 
-enum LookupPath<'a> {
-    RootDirectory(&'a Directory),
+pub enum FatFile {
     Directory(Directory),
-    File(DirectoryEntry),
+    Normal(DirectoryEntry),
 }
 
-fn lookup_path<'a, H, P>(
-    path: P,
-    root_directory: &'a Directory,
-    traverser: &mut Traverser<H>,
-) -> Result<LookupPath<'a>, Error>
+fn lookup_path<H, P>(traverser: &mut Traverser<H>, path: P) -> Result<FatFile, Error>
 where
     H: io::Seek + io::Read,
     P: AsRef<path::Path>,
 {
-    let mut directory_stack = vec![LookupPath::RootDirectory(root_directory)];
+    let mut directory_stack = vec![FatFile::Directory(read_root_directory(traverser)?)];
     for component in path.as_ref().components() {
         use path::Component;
         match component {
@@ -712,20 +703,19 @@ where
             }
             Component::Normal(os_str) => {
                 let directory = match directory_stack.last().ok_or(Error::InvalidPath)? {
-                    LookupPath::File(_) => return Err(Error::InvalidPath),
-                    LookupPath::RootDirectory(directory) => directory,
-                    LookupPath::Directory(ref directory) => directory,
+                    FatFile::Normal(_) => return Err(Error::InvalidPath),
+                    FatFile::Directory(ref directory) => directory,
                 };
                 let lookup_path = if let Some(entry) =
                     directory.find_entry(os_str.to_string_lossy().to_string().as_str())
                 {
                     if entry.is_directory() {
-                        LookupPath::Directory(Directory::from_traverser(
+                        FatFile::Directory(Directory::from_traverser(
                             traverser,
                             entry.first_cluster,
                         )?)
                     } else {
-                        LookupPath::File(entry.clone())
+                        FatFile::Normal(entry.clone())
                     }
                 } else {
                     return Err(Error::NoSuchFile);
@@ -737,17 +727,19 @@ where
     Ok(directory_stack.pop().ok_or(Error::InvalidPath)?)
 }
 
-pub fn root_directory<H>(
+pub fn list_file<H, P>(
     handle: &mut H,
     partition_byte_range: Range<u64>,
-) -> Result<Directory, Error>
+    path: P,
+) -> Result<FatFile, Error>
 where
     H: io::Seek + io::Read,
+    P: AsRef<path::Path>,
 {
     let mut buf = Vec::new();
     let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
-    read_root_directory(&mut traverser, &bpb, partition_byte_range.start)
+    lookup_path(&mut traverser, path)
 }
 
 pub fn read_file<H, O, P>(
@@ -764,12 +756,9 @@ where
     let mut buf = Vec::new();
     let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
-    let root_directory = read_root_directory(&mut traverser, &bpb, partition_byte_range.start)?;
-    match lookup_path(path, &root_directory, &mut traverser)? {
-        LookupPath::Directory(_) | LookupPath::RootDirectory(_) => {
-            Err(Error::ExpectedFileFoundDirectory)
-        }
-        LookupPath::File(entry) => traverser
+    match lookup_path(&mut traverser, path)? {
+        FatFile::Directory(_) => Err(Error::ExpectedFileFoundDirectory),
+        FatFile::Normal(entry) => traverser
             .traverse(entry.first_cluster)
             .write_data(entry.file_size, output),
     }
