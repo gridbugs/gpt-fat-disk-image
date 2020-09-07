@@ -301,43 +301,49 @@ impl Mbr {
     }
 }
 
+fn handle_read<H>(handle: &mut H, offset: u64, size: usize, buf: &mut Vec<u8>) -> Result<(), Error>
+where
+    H: io::Seek + io::Read,
+{
+    buf.resize(size, 0);
+    handle
+        .seek(io::SeekFrom::Start(offset))
+        .map_err(Error::Io)?;
+    handle.read_exact(buf).map_err(Error::Io)?;
+    Ok(())
+}
+
 pub fn first_partition_byte_range<H>(handle: &mut H) -> Result<Range<u64>, Error>
 where
     H: io::Seek + io::Read,
 {
     let mut buf = vec![0; LOGICAL_BLOCK_SIZE];
     // read the mbr
-    handle
-        .seek(io::SeekFrom::Start(0 * LOGICAL_BLOCK_SIZE as u64))
-        .map_err(Error::Io)?;
-    handle
-        .read_exact(&mut buf[0..LOGICAL_BLOCK_SIZE])
-        .map_err(Error::Io)?;
+    handle_read(
+        handle,
+        0 * LOGICAL_BLOCK_SIZE as u64,
+        LOGICAL_BLOCK_SIZE,
+        &mut buf,
+    )?;
     let _mbr = Mbr::parse(&buf)?;
-    handle
-        .seek(io::SeekFrom::Start(1 * LOGICAL_BLOCK_SIZE as u64))
-        .map_err(Error::Io)?;
     // read the gpt header
-    handle
-        .read_exact(&mut buf[0..LOGICAL_BLOCK_SIZE])
-        .map_err(Error::Io)?;
+    handle_read(
+        handle,
+        1 * LOGICAL_BLOCK_SIZE as u64,
+        LOGICAL_BLOCK_SIZE,
+        &mut buf,
+    )?;
     let header = GptHeader::parse(&buf)?;
     if header.my_lba != 1 {
         return Err(Error::UnexpectedMyLba(header.my_lba));
     }
     let partition_entry_array_byte_range = header.partition_entry_array_byte_range();
-    // resize buffer to fit partition entry array
-    buf.resize(partition_entry_array_byte_range.len(), 0);
-    // seek to start of partition entry array
-    handle
-        .seek(io::SeekFrom::Start(
-            partition_entry_array_byte_range.start as u64,
-        ))
-        .map_err(Error::Io)?;
-    // read partition entry array
-    handle
-        .read_exact(&mut buf[0..partition_entry_array_byte_range.len()])
-        .map_err(Error::Io)?;
+    handle_read(
+        handle,
+        partition_entry_array_byte_range.start as u64,
+        partition_entry_array_byte_range.len(),
+        &mut buf,
+    )?;
     let first_partition_entry = PartitionEntry::parse_array(&buf, &header)?
         .next()
         .ok_or(Error::NoPartitions)?;
