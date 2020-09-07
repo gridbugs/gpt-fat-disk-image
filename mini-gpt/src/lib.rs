@@ -12,6 +12,7 @@ pub enum Error {
     HeaderChecksumMismatch { computed: u32, expected: u32 },
     PartitionEntryArrayChecksumMismatch { computed: u32, expected: u32 },
     NoPartitions,
+    InvalidMbrSignature(u16),
 }
 
 #[derive(Debug)]
@@ -224,12 +225,95 @@ mod test {
     }
 }
 
+const MBR_BOOT_CODE_SIZE: usize = 440;
+const MBR_PARTITION_RECORD_COUNT: usize = 4;
+
+#[derive(Debug)]
+struct Mbr {
+    boot_code: Vec<u8>,
+    unique_mbr_disk_signature: u32,
+    partition_record: [MbrPartitionRecord; MBR_PARTITION_RECORD_COUNT],
+    signature: u16,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct MbrPartitionRecord {
+    boot_indicator: u8,
+    starting_chs: u32,
+    os_type: u8,
+    ending_chs: u32,
+    starting_lba: u32,
+    size_in_lba: u32,
+}
+
+const MBR_REQUIRED_SIGNATURE: u16 = 0xAA55;
+
+impl Mbr {
+    fn parse(raw: &[u8]) -> Result<Self, Error> {
+        use std::convert::TryInto;
+        const UNIQUE_MBR_SIGNATURE_OFFSET: usize = MBR_BOOT_CODE_SIZE;
+        const PARTITION_RECORD_OFFSET: usize = 446;
+        const PARTITION_RECORD_SIZE: usize = 16;
+        const SIGNATURE_OFFSET: usize = 510;
+        let boot_code = raw[0..MBR_BOOT_CODE_SIZE].to_vec();
+        let unique_mbr_disk_signature = u32::from_le_bytes(
+            raw[UNIQUE_MBR_SIGNATURE_OFFSET..(UNIQUE_MBR_SIGNATURE_OFFSET + 4)]
+                .try_into()
+                .unwrap(),
+        );
+        let partition_record = {
+            let mut partition_record = [MbrPartitionRecord::default(); MBR_PARTITION_RECORD_COUNT];
+            for i in 0..MBR_PARTITION_RECORD_COUNT {
+                let base = PARTITION_RECORD_OFFSET + i * PARTITION_RECORD_SIZE;
+                let partition_record_bytes = &raw[base..(base + PARTITION_RECORD_SIZE)];
+                partition_record[i] = MbrPartitionRecord {
+                    boot_indicator: partition_record_bytes[0],
+                    starting_chs: partition_record_bytes[1] as u32
+                        | ((partition_record_bytes[2] as u32) << 8)
+                        | ((partition_record_bytes[3] as u32) << 16),
+                    os_type: partition_record_bytes[4],
+                    ending_chs: partition_record_bytes[5] as u32
+                        | ((partition_record_bytes[6] as u32) << 8)
+                        | ((partition_record_bytes[7] as u32) << 16),
+                    starting_lba: partition_record_bytes[8] as u32
+                        | ((partition_record_bytes[9] as u32) << 8)
+                        | ((partition_record_bytes[10] as u32) << 16)
+                        | ((partition_record_bytes[11] as u32) << 24),
+                    size_in_lba: partition_record_bytes[12] as u32
+                        | ((partition_record_bytes[13] as u32) << 8)
+                        | ((partition_record_bytes[14] as u32) << 16)
+                        | ((partition_record_bytes[15] as u32) << 24),
+                };
+            }
+            partition_record
+        };
+        let signature = raw[SIGNATURE_OFFSET] as u16 | ((raw[SIGNATURE_OFFSET + 1] as u16) << 8);
+        if signature == MBR_REQUIRED_SIGNATURE {
+            Ok(Self {
+                boot_code,
+                unique_mbr_disk_signature,
+                partition_record,
+                signature,
+            })
+        } else {
+            Err(Error::InvalidMbrSignature(signature))
+        }
+    }
+}
+
 pub fn first_partition_byte_range<H>(handle: &mut H) -> Result<Range<u64>, Error>
 where
     H: io::Seek + io::Read,
 {
     let mut buf = vec![0; LOGICAL_BLOCK_SIZE];
-    // skip over the mbr
+    // read the mbr
+    handle
+        .seek(io::SeekFrom::Start(0 * LOGICAL_BLOCK_SIZE as u64))
+        .map_err(Error::Io)?;
+    handle
+        .read_exact(&mut buf[0..LOGICAL_BLOCK_SIZE])
+        .map_err(Error::Io)?;
+    let _mbr = Mbr::parse(&buf)?;
     handle
         .seek(io::SeekFrom::Start(1 * LOGICAL_BLOCK_SIZE as u64))
         .map_err(Error::Io)?;
