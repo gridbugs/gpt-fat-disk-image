@@ -22,3 +22,7 @@ path = "src/list.rs"
 [[bin]]
 name = "gpt-fat-disk-image-read"
 path = "src/read.rs"
+
+[[bin]]
+name = "gpt-fat-disk-image-create"
+path = "src/create.rs"
