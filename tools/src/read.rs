@@ -9,12 +9,11 @@ struct Args {
 
 impl Args {
     fn parse() -> Self {
-        use simon::Arg;
-        (simon::args_map! {
+        (meap::let_map! {
             let {
-                image_filename = simon::opt("i", "image", "path to disk image", "PATH").required();
-                read_filename = simon::opt("f", "file", "path within image of file to read", "PATH").required();
-                output = simon::opt::<String>("o", "output", "output file path (omit for stdout)", "PATH");
+                image_filename = opt_req("PATH", 'i').name("image").desc("path to disk image");
+                read_filename = opt_req("PATH", 'f').name("file").desc("path within image of file to read");
+                output = opt_opt::<String, _>("PATH", 'o').name("output").desc("output file path (omit for stdout)");
             } in {
                 Self {
                     image_filename,
