@@ -8,6 +8,8 @@ pub enum Error {
     IncorrectRevision(u32),
     InvalidHeaderSize(u32),
     UnexpectedMyLba(u64),
+    UnexpectedAlternateLba(u64),
+    HeaderDoesNotMatchBackup,
     UnexpectedNonZeroValue,
     HeaderChecksumMismatch { computed: u32, expected: u32 },
     PartitionEntryArrayChecksumMismatch { computed: u32, expected: u32 },
@@ -110,6 +112,17 @@ impl GptHeader {
             (self.size_of_partition_entry * self.number_of_partition_entries) as usize;
         partition_entry_array_start_index
             ..(partition_entry_array_start_index + partition_entry_array_size)
+    }
+
+    fn compare_header_and_backup_header(header: &Self, backup: &Self) -> Result<(), Error> {
+        if header.my_lba == backup.alternate_lba
+            || header.alternate_lba == backup.my_lba
+            || header.disk_guid == backup.disk_guid
+        {
+            Ok(())
+        } else {
+            Err(Error::HeaderDoesNotMatchBackup)
+        }
     }
 }
 
@@ -337,6 +350,15 @@ where
     if header.my_lba != 1 {
         return Err(Error::UnexpectedMyLba(header.my_lba));
     }
+    // read the backup gpt header
+    handle_read(
+        handle,
+        header.alternate_lba * LOGICAL_BLOCK_SIZE as u64,
+        LOGICAL_BLOCK_SIZE,
+        &mut buf,
+    )?;
+    let backup_header = GptHeader::parse(&buf)?;
+    GptHeader::compare_header_and_backup_header(&header, &backup_header)?;
     let partition_entry_array_byte_range = header.partition_entry_array_byte_range();
     handle_read(
         handle,
