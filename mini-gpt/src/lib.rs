@@ -15,6 +15,7 @@ pub enum Error {
     PartitionEntryArrayChecksumMismatch { computed: u32, expected: u32 },
     NoPartitions,
     InvalidMbrSignature(u16),
+    BackupPartitionArrayDoesNotMatch,
 }
 
 #[derive(Debug)]
@@ -105,13 +106,22 @@ impl GptHeader {
         crc32(&copy[0..(header_size as usize)])
     }
 
-    fn partition_entry_array_byte_range(&self) -> Range<usize> {
+    fn partition_entry_array_byte_range(&self) -> Range<u64> {
         let partition_entry_array_start_index =
-            self.partition_entry_lba as usize * LOGICAL_BLOCK_SIZE;
+            self.partition_entry_lba * LOGICAL_BLOCK_SIZE as u64;
         let partition_entry_array_size =
-            (self.size_of_partition_entry * self.number_of_partition_entries) as usize;
+            self.size_of_partition_entry * self.number_of_partition_entries;
         partition_entry_array_start_index
-            ..(partition_entry_array_start_index + partition_entry_array_size)
+            ..(partition_entry_array_start_index + partition_entry_array_size as u64)
+    }
+
+    fn backup_partition_entry_array_byte_range(&self) -> Range<u64> {
+        let partition_entry_array_start_index =
+            (self.last_usable_lba + 1) * LOGICAL_BLOCK_SIZE as u64;
+        let partition_entry_array_size =
+            self.size_of_partition_entry * self.number_of_partition_entries;
+        partition_entry_array_start_index
+            ..(partition_entry_array_start_index + partition_entry_array_size as u64)
     }
 
     fn compare_header_and_backup_header(header: &Self, backup: &Self) -> Result<(), Error> {
@@ -126,7 +136,7 @@ impl GptHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct PartitionEntry {
     partition_type_guid: u128,
     unique_partition_guid: u128,
@@ -362,12 +372,24 @@ where
     let partition_entry_array_byte_range = header.partition_entry_array_byte_range();
     handle_read(
         handle,
-        partition_entry_array_byte_range.start as u64,
-        partition_entry_array_byte_range.len(),
+        partition_entry_array_byte_range.start,
+        (partition_entry_array_byte_range.end - partition_entry_array_byte_range.start) as usize,
         &mut buf,
     )?;
-    let first_partition_entry = PartitionEntry::parse_array(&buf, &header)?
-        .next()
-        .ok_or(Error::NoPartitions)?;
+    let partition_entry_array = PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
+    let backup_partition_entry_array_byte_range = header.backup_partition_entry_array_byte_range();
+    handle_read(
+        handle,
+        backup_partition_entry_array_byte_range.start,
+        (backup_partition_entry_array_byte_range.end
+            - backup_partition_entry_array_byte_range.start) as usize,
+        &mut buf,
+    )?;
+    let backup_partition_entry_array =
+        PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
+    if backup_partition_entry_array != partition_entry_array {
+        return Err(Error::BackupPartitionArrayDoesNotMatch);
+    }
+    let first_partition_entry = partition_entry_array.first().ok_or(Error::NoPartitions)?;
     Ok(first_partition_entry.partition_byte_range())
 }
