@@ -115,15 +115,6 @@ impl GptHeader {
             ..(partition_entry_array_start_index + partition_entry_array_size as u64)
     }
 
-    fn backup_partition_entry_array_byte_range(&self) -> Range<u64> {
-        let partition_entry_array_start_index =
-            (self.last_usable_lba + 1) * LOGICAL_BLOCK_SIZE as u64;
-        let partition_entry_array_size =
-            self.size_of_partition_entry * self.number_of_partition_entries;
-        partition_entry_array_start_index
-            ..(partition_entry_array_start_index + partition_entry_array_size as u64)
-    }
-
     fn compare_header_and_backup_header(header: &Self, backup: &Self) -> Result<(), Error> {
         if header.my_lba == backup.alternate_lba
             || header.alternate_lba == backup.my_lba
@@ -377,7 +368,7 @@ where
         &mut buf,
     )?;
     let partition_entry_array = PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
-    let backup_partition_entry_array_byte_range = header.backup_partition_entry_array_byte_range();
+    let backup_partition_entry_array_byte_range = backup_header.partition_entry_array_byte_range();
     handle_read(
         handle,
         backup_partition_entry_array_byte_range.start,
