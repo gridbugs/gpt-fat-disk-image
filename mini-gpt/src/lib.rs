@@ -360,6 +360,7 @@ where
     )?;
     let backup_header = GptHeader::parse(&buf)?;
     GptHeader::compare_header_and_backup_header(&header, &backup_header)?;
+    // read the partition entry array
     let partition_entry_array_byte_range = header.partition_entry_array_byte_range();
     handle_read(
         handle,
@@ -368,6 +369,7 @@ where
         &mut buf,
     )?;
     let partition_entry_array = PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
+    // read the backup partition entry array
     let backup_partition_entry_array_byte_range = backup_header.partition_entry_array_byte_range();
     handle_read(
         handle,

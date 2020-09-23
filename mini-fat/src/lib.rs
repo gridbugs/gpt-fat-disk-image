@@ -22,9 +22,10 @@ pub enum Error {
     NoSuchFile,
     InvalidPath,
     ExpectedFileFoundDirectory,
+    BpbDoesNotMatchBackupBpb,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Bpb {
     jmp_boot: [u8; 3],
     oem_name: String,
@@ -651,7 +652,20 @@ where
     H: io::Seek + io::Read,
 {
     handle_read(handle, partition_byte_start, BPB_SIZE, buf)?;
-    Bpb::parse(&buf)
+    let bpb = Bpb::parse(&buf)?;
+    if bpb.bk_boot_sector != 0 {
+        handle_read(
+            handle,
+            partition_byte_start + (bpb.bytes_per_sector * bpb.bk_boot_sector) as u64,
+            BPB_SIZE,
+            buf,
+        )?;
+        let backup_bpb = Bpb::parse(&buf)?;
+        if backup_bpb != bpb {
+            return Err(Error::BpbDoesNotMatchBackupBpb);
+        }
+    }
+    Ok(bpb)
 }
 
 fn read_root_directory<H>(traverser: &mut Traverser<H>) -> Result<Directory, Error>
