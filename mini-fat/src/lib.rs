@@ -238,7 +238,7 @@ impl Bpb {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FatType {
+pub enum FatType {
     Fat12,
     Fat16,
     Fat32,
@@ -776,4 +776,20 @@ where
             .traverse(entry.first_cluster)
             .write_data(entry.file_size, output),
     }
+}
+
+#[derive(Debug)]
+pub struct FatInfo {
+    pub fat_type: FatType,
+}
+
+pub fn fat_info<H>(handle: &mut H, partition_byte_range: Range<u64>) -> Result<FatInfo, Error>
+where
+    H: io::Seek + io::Read,
+{
+    let mut buf = Vec::new();
+    let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
+    Ok(FatInfo {
+        fat_type: bpb.fat_type(),
+    })
 }

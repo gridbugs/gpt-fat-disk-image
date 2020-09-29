@@ -9,7 +9,6 @@ homepage = "https://github.com/stevebob/gpt-fat-disk-image"
 repository = "https://github.com/stevebob/gpt-fat-disk-image"
 description = "Tools for reading disk images with GPT partition tables and FAT filesystems"
 
-
 [dependencies]
 meap = "0.4"
 mini_gpt = { version = "0.1", path = "../mini-gpt" }
@@ -22,6 +21,10 @@ path = "src/list.rs"
 [[bin]]
 name = "gpt-fat-disk-image-read"
 path = "src/read.rs"
+
+[[bin]]
+name = "gpt-fat-disk-image-info"
+path = "src/info.rs"
 
 [[bin]]
 name = "gpt-fat-disk-image-create"
