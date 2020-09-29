@@ -23,6 +23,10 @@ pub enum Error {
     InvalidPath,
     ExpectedFileFoundDirectory,
     BpbDoesNotMatchBackupBpb,
+    InvalidFsInfoLeadSignature(u32),
+    InvalidFsInfoStrucSignature(u32),
+    InvalidFsInfoTrailSignature(u32),
+    FsInfoSectionsDoNotMatch,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +63,27 @@ const BPB_SIZE: usize = 512;
 const REQUIRED_SIGNATURE: u16 = 0xAA55;
 
 impl Bpb {
+    fn read<H>(handle: &mut H, partition_byte_start: u64, buf: &mut Vec<u8>) -> Result<Self, Error>
+    where
+        H: io::Seek + io::Read,
+    {
+        handle_read(handle, partition_byte_start, BPB_SIZE, buf)?;
+        let bpb = Bpb::parse(&buf)?;
+        if bpb.bk_boot_sector != 0 {
+            handle_read(
+                handle,
+                partition_byte_start + (bpb.bytes_per_sector * bpb.bk_boot_sector) as u64,
+                BPB_SIZE,
+                buf,
+            )?;
+            let backup_bpb = Bpb::parse(&buf)?;
+            if backup_bpb != bpb {
+                return Err(Error::BpbDoesNotMatchBackupBpb);
+            }
+        }
+        Ok(bpb)
+    }
+
     fn parse(raw: &[u8]) -> Result<Self, Error> {
         use std::convert::TryInto;
         let jmp_boot = [raw[0], raw[1], raw[2]];
@@ -449,6 +474,83 @@ impl Directory {
     }
 }
 
+const FS_INFO_SIZE: usize = 512;
+const FS_INFO_REQUIRED_LEAD_SIGNATURE: u32 = 0x41615252;
+const FS_INFO_REQUIRED_STRUC_SIGNATURE: u32 = 0x61417272;
+const FS_INFO_REQUIRED_TRAIL_SIGNATURE: u32 = 0xAA550000;
+
+#[derive(Debug, PartialEq, Eq)]
+struct FsInfo {
+    lead_signature: u32,
+    struc_signature: u32,
+    free_count: u32,
+    next_free: u32,
+    trail_signature: u32,
+}
+
+impl FsInfo {
+    fn read<H>(
+        bpb: &Bpb,
+        handle: &mut H,
+        partition_byte_start: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<Self, Error>
+    where
+        H: io::Seek + io::Read,
+    {
+        let fs_info_sector = bpb.fs_info as u64;
+        handle_read(
+            handle,
+            partition_byte_start + (fs_info_sector * bpb.bytes_per_sector as u64),
+            FS_INFO_SIZE,
+            buf,
+        )?;
+        let fs_info = Self::parse(buf)?;
+        let fs_info_backup_sector = (bpb.bk_boot_sector + bpb.fs_info) as u64;
+        handle_read(
+            handle,
+            partition_byte_start + (fs_info_backup_sector * bpb.bytes_per_sector as u64),
+            FS_INFO_SIZE,
+            buf,
+        )?;
+        match Self::parse(buf) {
+            Ok(fs_info_backup) => {
+                if fs_info_backup != fs_info {
+                    return Err(Error::FsInfoSectionsDoNotMatch);
+                }
+            }
+            Err(Error::InvalidFsInfoLeadSignature(_)) => (), // sometimes there is no backup FsInfo
+            Err(other) => return Err(other),
+        };
+        Ok(fs_info)
+    }
+
+    fn parse(raw: &[u8]) -> Result<Self, Error> {
+        use std::convert::TryInto;
+        let lead_signature = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+        if lead_signature != FS_INFO_REQUIRED_LEAD_SIGNATURE {
+            return Err(Error::InvalidFsInfoLeadSignature(lead_signature));
+        }
+        let struc_signature = u32::from_le_bytes(raw[484..488].try_into().unwrap());
+        if struc_signature != FS_INFO_REQUIRED_STRUC_SIGNATURE {
+            return Err(Error::InvalidFsInfoStrucSignature(struc_signature));
+        }
+        let free_count = u32::from_le_bytes(raw[488..492].try_into().unwrap());
+        let next_free = u32::from_le_bytes(raw[492..496].try_into().unwrap());
+        let trail_signature = u32::from_le_bytes(raw[508..512].try_into().unwrap());
+        if trail_signature != FS_INFO_REQUIRED_TRAIL_SIGNATURE {
+            return Err(Error::InvalidFsInfoTrailSignature(trail_signature));
+        }
+        Ok(Self {
+            lead_signature,
+            struc_signature,
+            free_count,
+            next_free,
+            trail_signature,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum FatLookupError {
     FreeCluster,
@@ -647,27 +749,6 @@ where
     }
 }
 
-fn read_bpb<H>(handle: &mut H, partition_byte_start: u64, buf: &mut Vec<u8>) -> Result<Bpb, Error>
-where
-    H: io::Seek + io::Read,
-{
-    handle_read(handle, partition_byte_start, BPB_SIZE, buf)?;
-    let bpb = Bpb::parse(&buf)?;
-    if bpb.bk_boot_sector != 0 {
-        handle_read(
-            handle,
-            partition_byte_start + (bpb.bytes_per_sector * bpb.bk_boot_sector) as u64,
-            BPB_SIZE,
-            buf,
-        )?;
-        let backup_bpb = Bpb::parse(&buf)?;
-        if backup_bpb != bpb {
-            return Err(Error::BpbDoesNotMatchBackupBpb);
-        }
-    }
-    Ok(bpb)
-}
-
 fn read_root_directory<H>(traverser: &mut Traverser<H>) -> Result<Directory, Error>
 where
     H: io::Seek + io::Read,
@@ -751,7 +832,7 @@ where
     P: AsRef<path::Path>,
 {
     let mut buf = Vec::new();
-    let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
+    let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
     lookup_path(&mut traverser, path)
 }
@@ -768,7 +849,7 @@ where
     P: AsRef<path::Path>,
 {
     let mut buf = Vec::new();
-    let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
+    let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
     match lookup_path(&mut traverser, path)? {
         FatFile::Directory(_) => Err(Error::ExpectedFileFoundDirectory),
@@ -780,7 +861,14 @@ where
 
 #[derive(Debug)]
 pub struct FatInfo {
-    pub fat_type: FatType,
+    bpb: Bpb,
+    fs_info: Option<FsInfo>,
+}
+
+impl FatInfo {
+    pub fn fat_type(&self) -> FatType {
+        self.bpb.fat_type()
+    }
 }
 
 pub fn fat_info<H>(handle: &mut H, partition_byte_range: Range<u64>) -> Result<FatInfo, Error>
@@ -788,8 +876,16 @@ where
     H: io::Seek + io::Read,
 {
     let mut buf = Vec::new();
-    let bpb = read_bpb(handle, partition_byte_range.start, &mut buf)?;
-    Ok(FatInfo {
-        fat_type: bpb.fat_type(),
-    })
+    let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
+    let fs_info = if let FatType::Fat32 = bpb.fat_type() {
+        Some(FsInfo::read(
+            &bpb,
+            handle,
+            partition_byte_range.start,
+            &mut buf,
+        )?)
+    } else {
+        None
+    };
+    Ok(FatInfo { bpb, fs_info })
 }
