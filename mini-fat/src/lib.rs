@@ -1,6 +1,17 @@
+use std::fs::File;
 use std::io;
 use std::ops::Range;
 use std::path;
+
+mod create {
+    pub const BYTES_PER_SECTOR: u16 = 512;
+    pub const SECTORS_PER_CLUSTER: u8 = 1;
+    pub const BYTES_PER_CLUSTER: u32 = BYTES_PER_SECTOR as u32 * SECTORS_PER_CLUSTER as u32;
+    pub const FAT_ENTRY_SIZE: u8 = 32; // all created images will be formatted as FAT32
+    pub const MIN_NUM_CLUSTERS: u64 = 65526; // 1 larger than the technical minimum for FAT32 to mitigate off-by-1 errors in firmware
+    pub const NUM_FATS: u8 = 2;
+    pub const RESERVED_SECTOR_COUNT: u16 = 32;
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -869,6 +880,9 @@ impl FatInfo {
     pub fn fat_type(&self) -> FatType {
         self.bpb.fat_type()
     }
+    pub fn num_clusters(&self) -> u32 {
+        self.bpb.count_of_clusters()
+    }
 }
 
 pub fn fat_info<H>(handle: &mut H, partition_byte_range: Range<u64>) -> Result<FatInfo, Error>
@@ -888,4 +902,74 @@ where
         None
     };
     Ok(FatInfo { bpb, fs_info })
+}
+
+#[derive(Debug)]
+pub struct PathPair {
+    pub in_local_filesystem: File,
+    pub in_disk_image: path::PathBuf,
+}
+
+pub fn partition_size<'a, I>(path_pairs: I) -> Result<u64, Error>
+where
+    I: IntoIterator<Item = &'a PathPair>,
+{
+    fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
+        if size % create::BYTES_PER_CLUSTER as u64 == 0 {
+            size
+        } else {
+            size + (create::BYTES_PER_CLUSTER as u64 - (size % create::BYTES_PER_CLUSTER as u64))
+        }
+    }
+    use path::Component;
+    use std::collections::{HashMap, HashSet};
+    let mut directory_entries: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
+    let mut total_file_size = 0;
+    for PathPair {
+        in_local_filesystem,
+        in_disk_image,
+    } in path_pairs
+    {
+        let file_size = in_local_filesystem.metadata().map_err(Error::Io)?.len();
+        total_file_size += round_up_to_nearest_cluster_size(file_size);
+        if in_disk_image.components().any(|component| match component {
+            Component::RootDir | Component::Normal(_) => false,
+            Component::CurDir | Component::Prefix(_) | Component::ParentDir => true,
+        }) {
+            return Err(Error::InvalidPath);
+        }
+        let mut path_component_iter = in_disk_image.components();
+        match path_component_iter.next() {
+            Some(Component::RootDir) => (),
+            _other => return Err(Error::InvalidPath),
+        }
+        let path_normals: Vec<String> = path_component_iter
+            .map(|component| match component {
+                Component::Normal(normal) => normal.to_string_lossy().into_owned(),
+                _other => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        if path_normals.is_empty() {
+            return Err(Error::InvalidPath);
+        }
+        for i in 0..(path_normals.len() - 1) {
+            let prefix = &path_normals[0..i];
+            let entry = &path_normals[i + 1];
+            directory_entries
+                .entry(prefix.to_vec())
+                .or_insert_with(Default::default)
+                .insert(entry.to_string());
+        }
+    }
+    for directory_entries in directory_entries.values() {
+        let directory_size = directory_entries.len() as u64 * DIRECTORY_ENTRY_BYTES as u64;
+        total_file_size += round_up_to_nearest_cluster_size(directory_size);
+    }
+    total_file_size =
+        total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64);
+    debug_assert!(total_file_size % create::BYTES_PER_CLUSTER as u64 == 0);
+    let num_clusters = total_file_size / create::BYTES_PER_CLUSTER as u64;
+    let fat_size = num_clusters * create::FAT_ENTRY_SIZE as u64 * create::NUM_FATS as u64;
+    let reserved_size = create::RESERVED_SECTOR_COUNT as u64 * create::BYTES_PER_SECTOR as u64;
+    Ok(total_file_size + round_up_to_nearest_cluster_size(fat_size) + reserved_size)
 }

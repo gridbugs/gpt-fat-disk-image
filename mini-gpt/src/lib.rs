@@ -327,7 +327,24 @@ where
     Ok(())
 }
 
-pub fn first_partition_byte_range<H>(handle: &mut H) -> Result<Range<u64>, Error>
+#[derive(Debug)]
+pub struct GptInfo {
+    mbr: Mbr,
+    header: GptHeader,
+    partition_entry_array: Vec<PartitionEntry>,
+}
+
+impl GptInfo {
+    pub fn first_partition_byte_range(&self) -> Result<Range<u64>, Error> {
+        let first_partition_entry = self
+            .partition_entry_array
+            .first()
+            .ok_or(Error::NoPartitions)?;
+        Ok(first_partition_entry.partition_byte_range())
+    }
+}
+
+pub fn gpt_info<H>(handle: &mut H) -> Result<GptInfo, Error>
 where
     H: io::Seek + io::Read,
 {
@@ -339,7 +356,7 @@ where
         LOGICAL_BLOCK_SIZE,
         &mut buf,
     )?;
-    let _mbr = Mbr::parse(&buf)?;
+    let mbr = Mbr::parse(&buf)?;
     // read the gpt header
     handle_read(
         handle,
@@ -383,6 +400,16 @@ where
     if backup_partition_entry_array != partition_entry_array {
         return Err(Error::BackupPartitionArrayDoesNotMatch);
     }
-    let first_partition_entry = partition_entry_array.first().ok_or(Error::NoPartitions)?;
-    Ok(first_partition_entry.partition_byte_range())
+    Ok(GptInfo {
+        mbr,
+        header,
+        partition_entry_array,
+    })
+}
+
+pub fn first_partition_byte_range<H>(handle: &mut H) -> Result<Range<u64>, Error>
+where
+    H: io::Seek + io::Read,
+{
+    gpt_info(handle)?.first_partition_byte_range()
 }

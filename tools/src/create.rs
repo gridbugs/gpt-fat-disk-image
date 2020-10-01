@@ -1,16 +1,9 @@
 use std::fs::File;
 use std::io;
-use std::path::PathBuf;
 use std::process;
 
-#[derive(Debug)]
-struct PathPair {
-    in_local_filesystem: PathBuf,
-    in_disk_image: PathBuf,
-}
-
 struct Args {
-    path_pairs: Vec<PathPair>,
+    path_pairs: Vec<mini_fat::PathPair>,
     output: Box<dyn io::Write>,
 }
 
@@ -18,7 +11,7 @@ impl Args {
     fn parse() -> Self {
         (meap::let_map! {
             let {
-                local_filesystem_paths = opt_multi("PATH", 'l')
+                local_filesystem_paths = opt_multi::<String, _>("PATH", 'l')
                     .name("local")
                     .desc("paths to local files to include in image (corresponds to -d)");
                 disk_image_paths = opt_multi("PATH", 'd')
@@ -33,7 +26,10 @@ impl Args {
                 let path_pairs = local_filesystem_paths
                     .into_iter()
                     .zip(disk_image_paths.into_iter())
-                    .map(|(in_local_filesystem, in_disk_image)| PathPair { in_local_filesystem, in_disk_image })
+                    .map(|(in_local_filesystem, in_disk_image)| mini_fat::PathPair {
+                        in_local_filesystem: File::open(in_local_filesystem).unwrap(),
+                        in_disk_image,
+                    })
                     .collect();
                 Self {
                     path_pairs,
@@ -52,5 +48,7 @@ impl Args {
 
 fn main() {
     let Args { path_pairs, output } = Args::parse();
+    let partition_size = mini_fat::partition_size(&path_pairs).unwrap();
     println!("{:?}", path_pairs);
+    println!("partition size: {}", partition_size);
 }
