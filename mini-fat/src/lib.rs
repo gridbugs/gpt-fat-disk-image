@@ -37,7 +37,6 @@ pub enum Error {
     InvalidFsInfoLeadSignature(u32),
     InvalidFsInfoStrucSignature(u32),
     InvalidFsInfoTrailSignature(u32),
-    FsInfoSectionsDoNotMatch,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -499,13 +498,19 @@ struct FsInfo {
     trail_signature: u32,
 }
 
+#[derive(Debug)]
+enum FsInfoWarning {
+    BackupDoesNotMatch(Box<FsInfo>),
+    NoBackup,
+}
+
 impl FsInfo {
     fn read<H>(
         bpb: &Bpb,
         handle: &mut H,
         partition_byte_start: u64,
         buf: &mut Vec<u8>,
-    ) -> Result<Self, Error>
+    ) -> Result<(Self, Option<FsInfoWarning>), Error>
     where
         H: io::Seek + io::Read,
     {
@@ -524,16 +529,18 @@ impl FsInfo {
             FS_INFO_SIZE,
             buf,
         )?;
-        match Self::parse(buf) {
+        let warning = match Self::parse(buf) {
             Ok(fs_info_backup) => {
                 if fs_info_backup != fs_info {
-                    return Err(Error::FsInfoSectionsDoNotMatch);
+                    Some(FsInfoWarning::BackupDoesNotMatch(Box::new(fs_info_backup)))
+                } else {
+                    None
                 }
             }
-            Err(Error::InvalidFsInfoLeadSignature(_)) => (), // sometimes there is no backup FsInfo
+            Err(Error::InvalidFsInfoLeadSignature(_)) => Some(FsInfoWarning::NoBackup),
             Err(other) => return Err(other),
         };
-        Ok(fs_info)
+        Ok((fs_info, warning))
     }
 
     fn parse(raw: &[u8]) -> Result<Self, Error> {
@@ -874,6 +881,7 @@ where
 pub struct FatInfo {
     bpb: Bpb,
     fs_info: Option<FsInfo>,
+    fs_info_warning: Option<FsInfoWarning>,
 }
 
 impl FatInfo {
@@ -891,17 +899,18 @@ where
 {
     let mut buf = Vec::new();
     let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
-    let fs_info = if let FatType::Fat32 = bpb.fat_type() {
-        Some(FsInfo::read(
-            &bpb,
-            handle,
-            partition_byte_range.start,
-            &mut buf,
-        )?)
+    let (fs_info, fs_info_warning) = if let FatType::Fat32 = bpb.fat_type() {
+        let (fs_info, fs_info_warning) =
+            FsInfo::read(&bpb, handle, partition_byte_range.start, &mut buf)?;
+        (Some(fs_info), fs_info_warning)
     } else {
-        None
+        (None, None)
     };
-    Ok(FatInfo { bpb, fs_info })
+    Ok(FatInfo {
+        bpb,
+        fs_info,
+        fs_info_warning,
+    })
 }
 
 #[derive(Debug)]
