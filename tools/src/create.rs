@@ -47,8 +47,10 @@ impl Args {
 }
 
 fn main() {
-    let Args { path_pairs, output } = Args::parse();
+    let Args {
+        path_pairs,
+        mut output,
+    } = Args::parse();
     let partition_size = mini_fat::partition_size(&path_pairs).unwrap();
-    println!("{:?}", path_pairs);
-    println!("partition size: {}", partition_size);
+    mini_gpt::write_header(&mut output, partition_size).unwrap();
 }

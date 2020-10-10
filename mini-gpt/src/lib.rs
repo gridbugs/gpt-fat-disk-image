@@ -239,14 +239,24 @@ mod test {
     }
 }
 
-const MBR_BOOT_CODE_SIZE: usize = 440;
-const MBR_PARTITION_RECORD_COUNT: usize = 4;
+mod mbr {
+    pub const BOOT_CODE_SIZE: usize = 440;
+    pub const PARTITION_RECORD_COUNT: usize = 4;
+    pub const REQUIRED_SIGNATURE: u16 = 0xAA55;
+    pub const UNIQUE_MBR_SIGNATURE_OFFSET: usize = BOOT_CODE_SIZE;
+    pub const PARTITION_RECORD_OFFSET: usize = 446;
+    pub const PARTITION_RECORD_SIZE: usize = 16;
+    pub const SIGNATURE_OFFSET: usize = 510;
+    pub const OS_TYPE_GPT_PROTECTIVE: u8 = 0xEE;
+    pub const PARTITION_RECORD_MAX_ENDING_CHS: u32 = 0xFFFFFF;
+    pub const PARTITION_RECORD_MAX_SIZE_IN_LBA: u32 = 0xFFFFFFFF;
+}
 
 #[derive(Debug)]
 struct Mbr {
-    boot_code: Vec<u8>,
+    boot_code: [u8; mbr::BOOT_CODE_SIZE],
     unique_mbr_disk_signature: u32,
-    partition_record: [MbrPartitionRecord; MBR_PARTITION_RECORD_COUNT],
+    partition_record: [MbrPartitionRecord; mbr::PARTITION_RECORD_COUNT],
     signature: u16,
 }
 
@@ -260,26 +270,76 @@ struct MbrPartitionRecord {
     size_in_lba: u32,
 }
 
-const MBR_REQUIRED_SIGNATURE: u16 = 0xAA55;
+impl MbrPartitionRecord {
+    fn new_protective_with_disk_size_in_lba(disk_size_in_lba: u64) -> Self {
+        Self {
+            boot_indicator: 0,
+            starting_chs: 512,
+            starting_lba: 1,
+            os_type: mbr::OS_TYPE_GPT_PROTECTIVE,
+            size_in_lba: (disk_size_in_lba - 1).min(mbr::PARTITION_RECORD_MAX_SIZE_IN_LBA as u64)
+                as u32,
+            ending_chs: (disk_size_in_lba * LOGICAL_BLOCK_SIZE as u64 - 1)
+                .min(mbr::PARTITION_RECORD_MAX_ENDING_CHS as u64) as u32,
+        }
+    }
+}
 
 impl Mbr {
+    fn new_protective_with_disk_size_in_lba(disk_size_in_lba: u64) -> Self {
+        Self {
+            boot_code: [0; mbr::BOOT_CODE_SIZE],
+            unique_mbr_disk_signature: 0,
+            partition_record: [
+                MbrPartitionRecord::new_protective_with_disk_size_in_lba(disk_size_in_lba),
+                MbrPartitionRecord::default(),
+                MbrPartitionRecord::default(),
+                MbrPartitionRecord::default(),
+            ],
+            signature: mbr::REQUIRED_SIGNATURE,
+        }
+    }
+    fn encode(&self) -> [u8; LOGICAL_BLOCK_SIZE] {
+        let mut encoded = [0; LOGICAL_BLOCK_SIZE];
+        (&mut encoded[0..mbr::BOOT_CODE_SIZE]).copy_from_slice(&self.boot_code);
+        (&mut encoded[mbr::UNIQUE_MBR_SIGNATURE_OFFSET..(mbr::UNIQUE_MBR_SIGNATURE_OFFSET + 4)])
+            .copy_from_slice(&self.unique_mbr_disk_signature.to_le_bytes());
+        for (i, partition_record) in self.partition_record.iter().enumerate() {
+            let base_index = mbr::PARTITION_RECORD_OFFSET + (mbr::PARTITION_RECORD_SIZE * i);
+            let partition_record_encoded =
+                &mut encoded[base_index..(base_index + mbr::PARTITION_RECORD_SIZE)];
+            partition_record_encoded[0] = partition_record.boot_indicator;
+            (&mut partition_record_encoded[1..4])
+                .copy_from_slice(&partition_record.starting_chs.to_le_bytes()[0..3]);
+            partition_record_encoded[4] = partition_record.os_type;
+            (&mut partition_record_encoded[5..8])
+                .copy_from_slice(&partition_record.ending_chs.to_le_bytes()[0..3]);
+            (&mut partition_record_encoded[8..12])
+                .copy_from_slice(&partition_record.starting_lba.to_le_bytes());
+            (&mut partition_record_encoded[12..16])
+                .copy_from_slice(&partition_record.size_in_lba.to_le_bytes());
+        }
+        (&mut encoded[mbr::SIGNATURE_OFFSET..mbr::SIGNATURE_OFFSET + 2])
+            .copy_from_slice(&self.signature.to_le_bytes()[0..2]);
+        encoded
+    }
     fn parse(raw: &[u8]) -> Result<Self, Error> {
         use std::convert::TryInto;
-        const UNIQUE_MBR_SIGNATURE_OFFSET: usize = MBR_BOOT_CODE_SIZE;
-        const PARTITION_RECORD_OFFSET: usize = 446;
-        const PARTITION_RECORD_SIZE: usize = 16;
-        const SIGNATURE_OFFSET: usize = 510;
-        let boot_code = raw[0..MBR_BOOT_CODE_SIZE].to_vec();
+        let boot_code = {
+            let mut boot_code = [0; mbr::BOOT_CODE_SIZE];
+            boot_code.copy_from_slice(&raw[0..mbr::BOOT_CODE_SIZE]);
+            boot_code
+        };
         let unique_mbr_disk_signature = u32::from_le_bytes(
-            raw[UNIQUE_MBR_SIGNATURE_OFFSET..(UNIQUE_MBR_SIGNATURE_OFFSET + 4)]
+            raw[mbr::UNIQUE_MBR_SIGNATURE_OFFSET..(mbr::UNIQUE_MBR_SIGNATURE_OFFSET + 4)]
                 .try_into()
                 .unwrap(),
         );
         let partition_record = {
-            let mut partition_record = [MbrPartitionRecord::default(); MBR_PARTITION_RECORD_COUNT];
-            for i in 0..MBR_PARTITION_RECORD_COUNT {
-                let base = PARTITION_RECORD_OFFSET + i * PARTITION_RECORD_SIZE;
-                let partition_record_bytes = &raw[base..(base + PARTITION_RECORD_SIZE)];
+            let mut partition_record = [MbrPartitionRecord::default(); mbr::PARTITION_RECORD_COUNT];
+            for i in 0..mbr::PARTITION_RECORD_COUNT {
+                let base = mbr::PARTITION_RECORD_OFFSET + i * mbr::PARTITION_RECORD_SIZE;
+                let partition_record_bytes = &raw[base..(base + mbr::PARTITION_RECORD_SIZE)];
                 partition_record[i] = MbrPartitionRecord {
                     boot_indicator: partition_record_bytes[0],
                     starting_chs: partition_record_bytes[1] as u32
@@ -301,8 +361,9 @@ impl Mbr {
             }
             partition_record
         };
-        let signature = raw[SIGNATURE_OFFSET] as u16 | ((raw[SIGNATURE_OFFSET + 1] as u16) << 8);
-        if signature == MBR_REQUIRED_SIGNATURE {
+        let signature =
+            raw[mbr::SIGNATURE_OFFSET] as u16 | ((raw[mbr::SIGNATURE_OFFSET + 1] as u16) << 8);
+        if signature == mbr::REQUIRED_SIGNATURE {
             Ok(Self {
                 boot_code,
                 unique_mbr_disk_signature,
@@ -412,4 +473,46 @@ where
     H: io::Seek + io::Read,
 {
     gpt_info(handle)?.first_partition_byte_range()
+}
+
+mod create {
+    pub const NUMBER_OF_PARTITION_ENTRIES: u64 = 4;
+    pub const SIZE_OF_PARTITION_ENTRY: u64 = 128;
+}
+
+fn disk_size(partition_size: u64) -> u64 {
+    // The disk must be large enough to contain the following:
+    // - mbr (1 LB)
+    // - gpt header (1 LB)
+    // - partition entry array
+    // - partition
+    // - backup partition entry array
+    // - backup gpt header (1 LB)
+    //
+    fn round_up_to_nearest_logical_block_size(size: u64) -> u64 {
+        if size % LOGICAL_BLOCK_SIZE as u64 == 0 {
+            size
+        } else {
+            size + (LOGICAL_BLOCK_SIZE as u64 - (size % LOGICAL_BLOCK_SIZE as u64))
+        }
+    }
+    let partition_entry_array_size = round_up_to_nearest_logical_block_size(
+        create::NUMBER_OF_PARTITION_ENTRIES * create::SIZE_OF_PARTITION_ENTRY,
+    );
+    (3 * LOGICAL_BLOCK_SIZE as u64)
+        + (partition_entry_array_size * 2)
+        + round_up_to_nearest_logical_block_size(partition_size)
+}
+
+pub fn write_header<H>(handle: &mut H, partition_size: u64) -> Result<(), Error>
+where
+    H: io::Write,
+{
+    let disk_size = disk_size(partition_size);
+    let disk_size_in_lba = disk_size / LOGICAL_BLOCK_SIZE as u64;
+    debug_assert!(disk_size_in_lba * LOGICAL_BLOCK_SIZE as u64 == disk_size);
+    handle
+        .write_all(&Mbr::new_protective_with_disk_size_in_lba(disk_size_in_lba).encode())
+        .map_err(Error::Io)?;
+    Ok(())
 }
