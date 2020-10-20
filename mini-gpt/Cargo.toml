@@ -12,3 +12,5 @@ description = "Minimal GPT disk image decoder"
 
 
 [dependencies]
+uuid = { version = "0.8", features = ["guid", "v4"] }
+rand = "0.7"

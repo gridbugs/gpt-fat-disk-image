@@ -1,5 +1,6 @@
 use std::io;
 use std::ops::Range;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum Error {
@@ -27,7 +28,7 @@ struct GptHeader {
     alternate_lba: u64,
     first_usable_lba: u64,
     last_usable_lba: u64,
-    disk_guid: u128,
+    disk_guid: Uuid,
     partition_entry_lba: u64,
     number_of_partition_entries: u32,
     size_of_partition_entry: u32,
@@ -40,6 +41,24 @@ const THIS_REVISION: u32 = 0x10000;
 const MIN_HEADER_SIZE: u32 = 92;
 
 impl GptHeader {
+    fn new_primary(disk_size_in_lba: u64, disk_guid: Uuid) -> Self {
+        let mut header = Self {
+            revision: THIS_REVISION,
+            header_size: MIN_HEADER_SIZE,
+            header_crc32: 0, // this will be set below
+            my_lba: 1,
+            alternate_lba: disk_size_in_lba - 1,
+            first_usable_lba: 2 // mbr and primary gpt header
+                + create::PARTITION_ARRAY_NUM_LBA,
+            last_usable_lba: disk_size_in_lba - 1 - create::PARTITION_ARRAY_NUM_LBA - 1,
+            disk_guid,
+            partition_entry_lba: 2, // mbr and primary gpt header
+            number_of_partition_entries: create::NUMBER_OF_PARTITION_ENTRIES,
+            size_of_partition_entry: create::SIZE_OF_PARTITION_ENTRY,
+            partition_entry_array_crc32: 0, // this will be set bellow
+        };
+        header
+    }
     fn parse(raw: &[u8]) -> Result<Self, Error> {
         use std::convert::TryInto;
         let signature = u64::from_le_bytes(raw[0..8].try_into().unwrap());
@@ -69,7 +88,7 @@ impl GptHeader {
         let alternate_lba = u64::from_le_bytes(raw[32..40].try_into().unwrap());
         let first_usable_lba = u64::from_le_bytes(raw[40..48].try_into().unwrap());
         let last_usable_lba = u64::from_le_bytes(raw[48..56].try_into().unwrap());
-        let disk_guid = u128::from_le_bytes(raw[56..72].try_into().unwrap());
+        let disk_guid = guid_to_uuid(u128::from_le_bytes(raw[56..72].try_into().unwrap()));
         let partition_entry_lba = u64::from_le_bytes(raw[72..80].try_into().unwrap());
         let number_of_partition_entries = u32::from_le_bytes(raw[80..84].try_into().unwrap());
         let size_of_partition_entry = u32::from_le_bytes(raw[84..88].try_into().unwrap());
@@ -127,17 +146,40 @@ impl GptHeader {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 struct PartitionEntry {
-    partition_type_guid: u128,
-    unique_partition_guid: u128,
+    partition_type_guid: Uuid,
+    unique_partition_guid: Uuid,
     starting_lba: u64,
     ending_lba: u64,
     attributes: u64,
     partition_name: String,
 }
 
+const PARITION_TYPE_GUID_EFI_SYSTEM_PARTITION_STR: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+
+mod gpt_partition_attributes {
+    pub const REQUIRED_PARTITION: u8 = 0;
+}
+
 impl PartitionEntry {
+    fn new_first_partition_with_size_in_lba(
+        partition_size_in_lba: u64,
+        unique_partition_guid: Uuid,
+        partition_name: String,
+    ) -> Self {
+        let starting_lba = 2 // mbr and primary gpt header
+                + create::PARTITION_ARRAY_NUM_LBA;
+        Self {
+            partition_type_guid: Uuid::parse_str(PARITION_TYPE_GUID_EFI_SYSTEM_PARTITION_STR)
+                .unwrap(),
+            unique_partition_guid,
+            starting_lba,
+            ending_lba: starting_lba + partition_size_in_lba - 1,
+            attributes: (1 << gpt_partition_attributes::REQUIRED_PARTITION),
+            partition_name,
+        }
+    }
     fn parse_array<'a>(
         raw: &'a [u8],
         header: &GptHeader,
@@ -170,8 +212,8 @@ impl PartitionEntry {
                 .collect::<Vec<_>>(),
         );
         Self {
-            partition_type_guid,
-            unique_partition_guid,
+            partition_type_guid: guid_to_uuid(partition_type_guid),
+            unique_partition_guid: guid_to_uuid(unique_partition_guid),
             starting_lba,
             ending_lba,
             attributes,
@@ -183,6 +225,14 @@ impl PartitionEntry {
         (self.starting_lba as u64 * LOGICAL_BLOCK_SIZE as u64)
             ..((self.ending_lba as u64 + 1) * LOGICAL_BLOCK_SIZE as u64)
     }
+}
+
+fn guid_to_uuid(guid: u128) -> Uuid {
+    let d1 = guid as u32;
+    let d2 = (guid >> 32) as u16;
+    let d3 = (guid >> 48) as u16;
+    let d4 = ((guid >> 64) as u64).to_le_bytes();
+    Uuid::from_fields(d1, d2, d3, &d4).unwrap()
 }
 
 const CRC32_LUT: &[u32] = &[
@@ -392,6 +442,7 @@ where
 pub struct GptInfo {
     mbr: Mbr,
     header: GptHeader,
+    backup_header: GptHeader,
     partition_entry_array: Vec<PartitionEntry>,
 }
 
@@ -464,6 +515,7 @@ where
     Ok(GptInfo {
         mbr,
         header,
+        backup_header,
         partition_entry_array,
     })
 }
@@ -475,42 +527,40 @@ where
     gpt_info(handle)?.first_partition_byte_range()
 }
 
-mod create {
-    pub const NUMBER_OF_PARTITION_ENTRIES: u64 = 4;
-    pub const SIZE_OF_PARTITION_ENTRY: u64 = 128;
+const fn size_in_bytes_to_num_logical_blocks(size: u64) -> u64 {
+    (size.saturating_sub(1) / LOGICAL_BLOCK_SIZE as u64) + 1
 }
 
-fn disk_size(partition_size: u64) -> u64 {
+mod create {
+    pub const NUMBER_OF_PARTITION_ENTRIES: u32 = 4;
+    pub const SIZE_OF_PARTITION_ENTRY: u32 = 128;
+    pub const PARTITION_ARRAY_NUM_LBA: u64 = super::size_in_bytes_to_num_logical_blocks(
+        NUMBER_OF_PARTITION_ENTRIES as u64 * SIZE_OF_PARTITION_ENTRY as u64,
+    );
+}
+
+fn disk_size_in_lba(partition_size_bytes: u64) -> u64 {
     // The disk must be large enough to contain the following:
     // - mbr (1 LB)
-    // - gpt header (1 LB)
-    // - partition entry array
+    // - primary gpt header (1 LB)
+    // - primary partition entry array
     // - partition
     // - backup partition entry array
     // - backup gpt header (1 LB)
     //
-    fn round_up_to_nearest_logical_block_size(size: u64) -> u64 {
-        if size % LOGICAL_BLOCK_SIZE as u64 == 0 {
-            size
-        } else {
-            size + (LOGICAL_BLOCK_SIZE as u64 - (size % LOGICAL_BLOCK_SIZE as u64))
-        }
-    }
-    let partition_entry_array_size = round_up_to_nearest_logical_block_size(
-        create::NUMBER_OF_PARTITION_ENTRIES * create::SIZE_OF_PARTITION_ENTRY,
-    );
-    (3 * LOGICAL_BLOCK_SIZE as u64)
-        + (partition_entry_array_size * 2)
-        + round_up_to_nearest_logical_block_size(partition_size)
+    1 // mbr
+        + 1 // primary gpt header
+        + create::PARTITION_ARRAY_NUM_LBA // primary partition array
+        + size_in_bytes_to_num_logical_blocks(partition_size_bytes)
+        + create::PARTITION_ARRAY_NUM_LBA // backup primary array
+        + 1 // backup gpt header
 }
 
-pub fn write_header<H>(handle: &mut H, partition_size: u64) -> Result<(), Error>
+pub fn write_header<H>(handle: &mut H, partition_size_bytes: u64) -> Result<(), Error>
 where
     H: io::Write,
 {
-    let disk_size = disk_size(partition_size);
-    let disk_size_in_lba = disk_size / LOGICAL_BLOCK_SIZE as u64;
-    debug_assert!(disk_size_in_lba * LOGICAL_BLOCK_SIZE as u64 == disk_size);
+    let disk_size_in_lba = disk_size_in_lba(partition_size_bytes);
     handle
         .write_all(&Mbr::new_protective_with_disk_size_in_lba(disk_size_in_lba).encode())
         .map_err(Error::Io)?;
