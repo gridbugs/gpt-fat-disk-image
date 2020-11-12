@@ -32,6 +32,7 @@ pub enum Error {
     FatLookup(FatLookupError),
     NoSuchFile,
     InvalidPath,
+    InvalidDiskPath(String),
     ExpectedFileFoundDirectory,
     BpbDoesNotMatchBackupBpb,
     InvalidFsInfoLeadSignature(u32),
@@ -919,10 +920,116 @@ pub struct PathPair {
     pub in_disk_image: path::PathBuf,
 }
 
+mod directory_hierarchy {
+    use super::{Error, PathPair};
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::path::{Component, Components};
+
+    pub type Directory<'a> = HashMap<String, Node<'a>>;
+
+    pub enum Node<'a> {
+        Directory(Directory<'a>),
+        File(&'a File),
+    }
+
+    fn directory_insert<'a>(
+        directory: &mut Directory<'a>,
+        current: Component,
+        mut rest: Components,
+        file: &'a File,
+    ) -> Result<(), Error> {
+        if let Component::Normal(os_str) = current {
+            let name = os_str
+                .to_str()
+                .ok_or_else(|| {
+                    Error::InvalidDiskPath(
+                        "disk image paths must consist of utf-8 characters".to_string(),
+                    )
+                })?
+                .to_string();
+            if let Some(next) = rest.next() {
+                // current component refers to directory
+                match directory
+                    .entry(name)
+                    .or_insert_with(|| Node::Directory(Directory::default()))
+                {
+                    Node::Directory(directory) => directory_insert(directory, next, rest, file)?,
+                    Node::File(_) => {
+                        return Err(Error::InvalidDiskPath(
+                            "path refers to subdirectory of file".to_string(),
+                        ))
+                    }
+                }
+            } else {
+                // current component refers to file
+                if directory.contains_key(&name) {
+                    return Err(Error::InvalidDiskPath(
+                        "path refers to existant file or directory".to_string(),
+                    ));
+                }
+                directory.insert(name, Node::File(file));
+            }
+            Ok(())
+        } else {
+            Err(Error::InvalidDiskPath(
+                "disk image paths must consist of normal components".to_string(),
+            ))
+        }
+    }
+
+    fn directory_for_each<'a, F: FnMut(&Node<'a>)>(directory: &Directory<'a>, f: &mut F) {
+        directory.values().for_each(|node| {
+            f(node);
+            if let Node::Directory(subdirectory) = node {
+                directory_for_each(subdirectory, f);
+            }
+        })
+    }
+
+    pub struct DirectoryHierarchy<'a> {
+        root: Directory<'a>,
+    }
+
+    impl<'a> DirectoryHierarchy<'a> {
+        pub fn new<I>(path_pairs: I) -> Result<Self, Error>
+        where
+            I: IntoIterator<Item = &'a PathPair>,
+        {
+            let mut root = HashMap::new();
+            for PathPair {
+                in_local_filesystem,
+                in_disk_image,
+            } in path_pairs
+            {
+                let mut components = in_disk_image.components();
+                let first = components
+                    .next()
+                    .ok_or(Error::InvalidDiskPath("path must not be empty".to_string()))?;
+                if first != Component::RootDir {
+                    return Err(Error::InvalidDiskPath(
+                        "paths in disk image must start with root".to_string(),
+                    ));
+                }
+                let first_non_root = components.next().ok_or(Error::InvalidDiskPath(
+                    "paths must refer to normal file paths - not root directory".to_string(),
+                ))?;
+                directory_insert(&mut root, first_non_root, components, &in_local_filesystem)?;
+            }
+            Ok(Self { root })
+        }
+
+        pub fn for_each<F: FnMut(&Node<'a>)>(&self, mut f: F) {
+            directory_for_each(&self.root, &mut f);
+        }
+    }
+}
+
 pub fn partition_size<'a, I>(path_pairs: I) -> Result<u64, Error>
 where
     I: IntoIterator<Item = &'a PathPair>,
 {
+    use directory_hierarchy::{DirectoryHierarchy, Node};
     fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
         if size % create::BYTES_PER_CLUSTER as u64 == 0 {
             size
@@ -930,52 +1037,33 @@ where
             size + (create::BYTES_PER_CLUSTER as u64 - (size % create::BYTES_PER_CLUSTER as u64))
         }
     }
-    use path::Component;
-    use std::collections::{HashMap, HashSet};
-    let mut directory_entries: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
-    let mut total_file_size = 0;
-    for PathPair {
-        in_local_filesystem,
-        in_disk_image,
-    } in path_pairs
-    {
-        let file_size = in_local_filesystem.metadata().map_err(Error::Io)?.len();
-        total_file_size += round_up_to_nearest_cluster_size(file_size);
-        if in_disk_image.components().any(|component| match component {
-            Component::RootDir | Component::Normal(_) => false,
-            Component::CurDir | Component::Prefix(_) | Component::ParentDir => true,
-        }) {
-            return Err(Error::InvalidPath);
+    let path_pairs = path_pairs.into_iter().collect::<Vec<_>>();
+    let total_file_size = {
+        let hierarchy = DirectoryHierarchy::new(path_pairs.iter().cloned())?;
+        let mut total_file_size = 0;
+        let mut error = None;
+        hierarchy.for_each(|node| {
+            if error.is_none() {
+                match node {
+                    Node::File(file) => match file.metadata() {
+                        Ok(metadata) => {
+                            total_file_size += round_up_to_nearest_cluster_size(metadata.len())
+                        }
+                        Err(e) => error = Some(Error::Io(e)),
+                    },
+                    Node::Directory(directory) => {
+                        total_file_size += round_up_to_nearest_cluster_size(
+                            directory.len() as u64 * DIRECTORY_ENTRY_BYTES as u64,
+                        )
+                    }
+                }
+            }
+        });
+        if let Some(e) = error {
+            return Err(e);
         }
-        let mut path_component_iter = in_disk_image.components();
-        match path_component_iter.next() {
-            Some(Component::RootDir) => (),
-            _other => return Err(Error::InvalidPath),
-        }
-        let path_normals: Vec<String> = path_component_iter
-            .map(|component| match component {
-                Component::Normal(normal) => normal.to_string_lossy().into_owned(),
-                _other => unreachable!(),
-            })
-            .collect::<Vec<_>>();
-        if path_normals.is_empty() {
-            return Err(Error::InvalidPath);
-        }
-        for i in 0..(path_normals.len() - 1) {
-            let prefix = &path_normals[0..i];
-            let entry = &path_normals[i + 1];
-            directory_entries
-                .entry(prefix.to_vec())
-                .or_insert_with(Default::default)
-                .insert(entry.to_string());
-        }
-    }
-    for directory_entries in directory_entries.values() {
-        let directory_size = directory_entries.len() as u64 * DIRECTORY_ENTRY_BYTES as u64;
-        total_file_size += round_up_to_nearest_cluster_size(directory_size);
-    }
-    total_file_size =
-        total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64);
+        total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64)
+    };
     debug_assert!(total_file_size % create::BYTES_PER_CLUSTER as u64 == 0);
     let num_clusters = total_file_size / create::BYTES_PER_CLUSTER as u64;
     let fat_size = num_clusters * create::FAT_ENTRY_SIZE as u64 * create::NUM_FATS as u64;

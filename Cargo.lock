@@ -46,7 +46,6 @@ version = "0.1.0"
 name = "mini_gpt"
 version = "0.1.0"
 dependencies = [
- "rand",
  "uuid",
 ]
 
