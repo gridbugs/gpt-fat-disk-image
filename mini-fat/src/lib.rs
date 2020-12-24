@@ -920,8 +920,16 @@ pub struct PathPair {
     pub in_disk_image: path::PathBuf,
 }
 
+fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
+    if size % create::BYTES_PER_CLUSTER as u64 == 0 {
+        size
+    } else {
+        size + (create::BYTES_PER_CLUSTER as u64 - (size % create::BYTES_PER_CLUSTER as u64))
+    }
+}
+
 mod directory_hierarchy {
-    use super::{Error, PathPair};
+    use super::{create, round_up_to_nearest_cluster_size, Error, PathPair, DIRECTORY_ENTRY_BYTES};
     use std::collections::HashMap;
     use std::fs::File;
     use std::path::{Component, Components};
@@ -1022,6 +1030,36 @@ mod directory_hierarchy {
         pub fn for_each<F: FnMut(&Node<'a>)>(&self, mut f: F) {
             directory_for_each(&self.root, &mut f);
         }
+
+        pub fn implied_num_clusters(&self) -> Result<u64, Error> {
+            let mut total_file_size = 0;
+            let mut error = None;
+            self.for_each(|node| {
+                if error.is_none() {
+                    match node {
+                        Node::File(file) => match file.metadata() {
+                            Ok(metadata) => {
+                                total_file_size += round_up_to_nearest_cluster_size(metadata.len())
+                            }
+                            Err(e) => error = Some(Error::Io(e)),
+                        },
+                        Node::Directory(directory) => {
+                            total_file_size += round_up_to_nearest_cluster_size(
+                                directory.len() as u64 * DIRECTORY_ENTRY_BYTES as u64,
+                            )
+                        }
+                    }
+                }
+            });
+            if let Some(e) = error {
+                return Err(e);
+            }
+            debug_assert!(total_file_size % create::BYTES_PER_CLUSTER as u64 == 0);
+            total_file_size =
+                total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64);
+            let num_clusters = total_file_size / create::BYTES_PER_CLUSTER as u64;
+            Ok(num_clusters)
+        }
     }
 }
 
@@ -1029,7 +1067,7 @@ pub fn partition_size<'a, I>(path_pairs: I) -> Result<u64, Error>
 where
     I: IntoIterator<Item = &'a PathPair>,
 {
-    use directory_hierarchy::{DirectoryHierarchy, Node};
+    use directory_hierarchy::DirectoryHierarchy;
     fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
         if size % create::BYTES_PER_CLUSTER as u64 == 0 {
             size
@@ -1037,36 +1075,21 @@ where
             size + (create::BYTES_PER_CLUSTER as u64 - (size % create::BYTES_PER_CLUSTER as u64))
         }
     }
-    let path_pairs = path_pairs.into_iter().collect::<Vec<_>>();
-    let total_file_size = {
-        let hierarchy = DirectoryHierarchy::new(path_pairs.iter().cloned())?;
-        let mut total_file_size = 0;
-        let mut error = None;
-        hierarchy.for_each(|node| {
-            if error.is_none() {
-                match node {
-                    Node::File(file) => match file.metadata() {
-                        Ok(metadata) => {
-                            total_file_size += round_up_to_nearest_cluster_size(metadata.len())
-                        }
-                        Err(e) => error = Some(Error::Io(e)),
-                    },
-                    Node::Directory(directory) => {
-                        total_file_size += round_up_to_nearest_cluster_size(
-                            directory.len() as u64 * DIRECTORY_ENTRY_BYTES as u64,
-                        )
-                    }
-                }
-            }
-        });
-        if let Some(e) = error {
-            return Err(e);
-        }
-        total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64)
-    };
-    debug_assert!(total_file_size % create::BYTES_PER_CLUSTER as u64 == 0);
-    let num_clusters = total_file_size / create::BYTES_PER_CLUSTER as u64;
+    let num_clusters = DirectoryHierarchy::new(path_pairs)?.implied_num_clusters()?;
     let fat_size = num_clusters * create::FAT_ENTRY_SIZE as u64 * create::NUM_FATS as u64;
     let reserved_size = create::RESERVED_SECTOR_COUNT as u64 * create::BYTES_PER_SECTOR as u64;
-    Ok(total_file_size + round_up_to_nearest_cluster_size(fat_size) + reserved_size)
+    Ok(num_clusters * create::BYTES_PER_CLUSTER as u64
+        + round_up_to_nearest_cluster_size(fat_size)
+        + reserved_size)
+}
+
+pub fn write_partition<'a, H, I>(handle: &mut H, path_pairs: I) -> Result<(), Error>
+where
+    H: io::Write,
+    I: IntoIterator<Item = &'a PathPair>,
+{
+    use directory_hierarchy::DirectoryHierarchy;
+    let hierarchy = DirectoryHierarchy::new(path_pairs)?;
+    let num_clusters = hierarchy.implied_num_clusters()?;
+    Ok(())
 }
