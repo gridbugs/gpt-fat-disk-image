@@ -7,10 +7,23 @@ mod create {
     pub const BYTES_PER_SECTOR: u16 = 512;
     pub const SECTORS_PER_CLUSTER: u8 = 1;
     pub const BYTES_PER_CLUSTER: u32 = BYTES_PER_SECTOR as u32 * SECTORS_PER_CLUSTER as u32;
-    pub const FAT_ENTRY_SIZE: u8 = 32; // all created images will be formatted as FAT32
+    pub const FAT_ENTRY_SIZE_BYTES: u8 = 4; // all created images will be formatted as FAT32
     pub const MIN_NUM_CLUSTERS: u64 = 65526; // 1 larger than the technical minimum for FAT32 to mitigate off-by-1 errors in firmware
     pub const NUM_FATS: u8 = 2;
     pub const RESERVED_SECTOR_COUNT: u16 = 32;
+    pub const JMP_BOOT: [u8; 3] = [235, 88, 144]; // copied from mkfs.fat
+    pub const OEM_NAME: &str = "mini_fat";
+    pub const MEDIA_FIXED: u8 = 0xF8;
+    pub const SECTORS_PER_TRACK: u16 = 32; // copied from mkfs.fat
+    pub const NUM_HEADS: u16 = 64; // copied from mkfs.fat
+    pub const NUM_HIDDEN_SECTORS: u32 = 0;
+    pub const VERSION: u16 = 0;
+    pub const ROOT_CLUSTER: u32 = 2;
+    pub const FS_INFO: u16 = 1;
+    pub const BK_BOOT_SECTOR: u16 = 6;
+    pub const DRIVE_NUM: u8 = 128; // copied from mkfs.fat
+    pub const VOLUME_LABEL: &str = "NO NAME    "; // copied from mkfs.fat
+    pub const FAT32_FILE_SYSTEM_TYPE: &str = "FAT32   "; // copied from mkfs.fat
 }
 
 #[derive(Debug)]
@@ -72,6 +85,7 @@ struct Bpb {
 
 const BPB_SIZE: usize = 512;
 const REQUIRED_SIGNATURE: u16 = 0xAA55;
+const BOOT_SIGNATURE: u8 = 0x29;
 
 impl Bpb {
     fn read<H>(handle: &mut H, partition_byte_start: u64, buf: &mut Vec<u8>) -> Result<Self, Error>
@@ -93,6 +107,54 @@ impl Bpb {
             }
         }
         Ok(bpb)
+    }
+
+    fn new_fat32_raw(
+        hierarchy: &directory_hierarchy::DirectoryHierarchy,
+    ) -> Result<[u8; BPB_SIZE], Error> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let mut raw = [0; BPB_SIZE];
+        raw[0..3].copy_from_slice(&create::JMP_BOOT);
+        let oem_bytes = create::OEM_NAME.as_bytes();
+        assert!(oem_bytes.len() <= 8);
+        raw[3..(3 + oem_bytes.len())].copy_from_slice(oem_bytes);
+        raw[11..13].copy_from_slice(&create::BYTES_PER_SECTOR.to_le_bytes());
+        raw[13] = create::SECTORS_PER_CLUSTER;
+        raw[14..16].copy_from_slice(&create::RESERVED_SECTOR_COUNT.to_le_bytes());
+        raw[16] = create::NUM_FATS;
+        raw[17..19].copy_from_slice(&0u16.to_le_bytes()); // root entry count - 0 on fat32
+        raw[19..21].copy_from_slice(&0u16.to_le_bytes()); // total sectors 16 - 0 on fat32
+        raw[21] = create::MEDIA_FIXED;
+        raw[22..24].copy_from_slice(&0u16.to_le_bytes()); // fat size 16 - 0 on fat32
+        raw[24..26].copy_from_slice(&create::SECTORS_PER_TRACK.to_le_bytes());
+        raw[26..28].copy_from_slice(&create::NUM_HEADS.to_le_bytes());
+        raw[28..32].copy_from_slice(&create::NUM_HIDDEN_SECTORS.to_le_bytes());
+        let num_sectors = hierarchy.implied_total_num_clusters()? as u32; // number of sectors in all regions of the partition
+        raw[32..36].copy_from_slice(&num_sectors.to_le_bytes());
+        let fat_size_in_bytes: u32 =
+            hierarchy.implied_num_data_clusters()? as u32 * create::FAT_ENTRY_SIZE_BYTES as u32;
+        let fat_size_in_sectors: u32 =
+            ((fat_size_in_bytes - 1) / create::BYTES_PER_SECTOR as u32) + 1; // divide rounding up
+        raw[36..40].copy_from_slice(&fat_size_in_sectors.to_le_bytes());
+        raw[40..42].copy_from_slice(&0u16.to_le_bytes()); // flags
+        raw[42..44].copy_from_slice(&create::VERSION.to_le_bytes());
+        raw[44..48].copy_from_slice(&create::ROOT_CLUSTER.to_le_bytes());
+        raw[48..50].copy_from_slice(&create::FS_INFO.to_le_bytes());
+        raw[50..52].copy_from_slice(&create::BK_BOOT_SECTOR.to_le_bytes());
+        raw[64] = create::DRIVE_NUM;
+        raw[66] = BOOT_SIGNATURE;
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|e| e.duration())
+            .as_millis() as u32;
+        raw[67..71].copy_from_slice(&since_epoch.to_le_bytes());
+        let volume_label_bytes = create::VOLUME_LABEL.as_bytes();
+        assert!(volume_label_bytes.len() <= 11);
+        raw[71..(71 + volume_label_bytes.len())].copy_from_slice(volume_label_bytes);
+        let file_system_type = create::FAT32_FILE_SYSTEM_TYPE.as_bytes();
+        raw[82..(82 + file_system_type.len())].copy_from_slice(file_system_type);
+        raw[510..512].copy_from_slice(&REQUIRED_SIGNATURE.to_le_bytes());
+        Ok(raw)
     }
 
     fn parse(raw: &[u8]) -> Result<Self, Error> {
@@ -139,7 +201,7 @@ impl Bpb {
             }
             drive_number = raw[64];
             if raw[65] != 0 {
-                return Err(Error::UnexpectedNonZero { byte_index: 65 });
+                //return Err(Error::UnexpectedNonZero { byte_index: 65 });
             }
             boot_signature = raw[66];
             volume_id = u32::from_le_bytes(raw[67..71].try_into().unwrap());
@@ -506,6 +568,16 @@ enum FsInfoWarning {
 }
 
 impl FsInfo {
+    fn new_raw(free_count: u32, next_free: u32) -> [u8; FS_INFO_SIZE] {
+        let mut raw = [0; FS_INFO_SIZE];
+        raw[0..4].copy_from_slice(&FS_INFO_REQUIRED_LEAD_SIGNATURE.to_le_bytes());
+        raw[484..488].copy_from_slice(&FS_INFO_REQUIRED_STRUC_SIGNATURE.to_le_bytes());
+        raw[488..492].copy_from_slice(&free_count.to_le_bytes());
+        raw[492..496].copy_from_slice(&next_free.to_le_bytes());
+        raw[508..512].copy_from_slice(&FS_INFO_REQUIRED_TRAIL_SIGNATURE.to_le_bytes());
+        raw
+    }
+
     fn read<H>(
         bpb: &Bpb,
         handle: &mut H,
@@ -936,6 +1008,7 @@ mod directory_hierarchy {
 
     pub type Directory<'a> = HashMap<String, Node<'a>>;
 
+    #[derive(Debug)]
     pub enum Node<'a> {
         Directory(Directory<'a>),
         File(&'a File),
@@ -1031,7 +1104,7 @@ mod directory_hierarchy {
             directory_for_each(&self.root, &mut f);
         }
 
-        pub fn implied_num_clusters(&self) -> Result<u64, Error> {
+        pub fn implied_num_data_clusters(&self) -> Result<u32, Error> {
             let mut total_file_size = 0;
             let mut error = None;
             self.for_each(|node| {
@@ -1058,6 +1131,20 @@ mod directory_hierarchy {
             total_file_size =
                 total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64);
             let num_clusters = total_file_size / create::BYTES_PER_CLUSTER as u64;
+            assert!(num_clusters <= u32::MAX as u64);
+            Ok(num_clusters as u32)
+        }
+
+        pub fn implied_total_num_clusters(&self) -> Result<u64, Error> {
+            let num_clusters = self.implied_num_data_clusters()? as u64;
+            let fat_size =
+                num_clusters * create::FAT_ENTRY_SIZE_BYTES as u64 * create::NUM_FATS as u64;
+            let reserved_size =
+                create::RESERVED_SECTOR_COUNT as u64 * create::BYTES_PER_SECTOR as u64;
+            let num_bytes = num_clusters * create::BYTES_PER_CLUSTER as u64
+                + round_up_to_nearest_cluster_size(fat_size)
+                + reserved_size;
+            let num_clusters = num_bytes / (create::BYTES_PER_CLUSTER as u64);
             Ok(num_clusters)
         }
     }
@@ -1068,19 +1155,17 @@ where
     I: IntoIterator<Item = &'a PathPair>,
 {
     use directory_hierarchy::DirectoryHierarchy;
-    fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
-        if size % create::BYTES_PER_CLUSTER as u64 == 0 {
-            size
-        } else {
-            size + (create::BYTES_PER_CLUSTER as u64 - (size % create::BYTES_PER_CLUSTER as u64))
-        }
-    }
-    let num_clusters = DirectoryHierarchy::new(path_pairs)?.implied_num_clusters()?;
-    let fat_size = num_clusters * create::FAT_ENTRY_SIZE as u64 * create::NUM_FATS as u64;
-    let reserved_size = create::RESERVED_SECTOR_COUNT as u64 * create::BYTES_PER_SECTOR as u64;
-    Ok(num_clusters * create::BYTES_PER_CLUSTER as u64
-        + round_up_to_nearest_cluster_size(fat_size)
-        + reserved_size)
+    let num_clusters = DirectoryHierarchy::new(path_pairs)?.implied_total_num_clusters()?;
+    Ok(num_clusters * create::BYTES_PER_CLUSTER as u64)
+}
+
+fn write_zero_sector<H>(handle: &mut H) -> Result<(), Error>
+where
+    H: io::Write,
+{
+    handle
+        .write_all(&[0; create::BYTES_PER_SECTOR as usize])
+        .map_err(Error::Io)
 }
 
 pub fn write_partition<'a, H, I>(handle: &mut H, path_pairs: I) -> Result<(), Error>
@@ -1090,6 +1175,17 @@ where
 {
     use directory_hierarchy::DirectoryHierarchy;
     let hierarchy = DirectoryHierarchy::new(path_pairs)?;
-    let num_clusters = hierarchy.implied_num_clusters()?;
+    let bpb_raw = Bpb::new_fat32_raw(&hierarchy)?;
+    let bpb = Bpb::parse(&bpb_raw)?;
+    let _fat_type = bpb.fat_type(); // sanity check
+    let fs_info_raw = FsInfo::new_raw(0, hierarchy.implied_num_data_clusters()?);
+    let _fs_info = FsInfo::parse(&fs_info_raw); // sanity check
+    handle.write_all(&bpb_raw).map_err(Error::Io)?; // sector 0
+    handle.write_all(&fs_info_raw).map_err(Error::Io)?; // sector 1
+    for _ in 2..create::BK_BOOT_SECTOR {
+        write_zero_sector(handle)?;
+    }
+    handle.write_all(&bpb_raw).map_err(Error::Io)?; // sector 6
+    handle.write_all(&fs_info_raw).map_err(Error::Io)?; // sector 7
     Ok(())
 }

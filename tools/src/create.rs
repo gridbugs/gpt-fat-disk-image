@@ -15,8 +15,7 @@ impl Args {
                     .name("local")
                     .desc("paths to local files to include in image (corresponds to -d)");
                 disk_image_paths = opt_multi("PATH", 'd')
-                    .name("disk")
-                    .desc("paths in disk image where files will be stored (corresponds to -l)");
+                    .name("disk") .desc("paths in disk image where files will be stored (corresponds to -l)");
                 output = opt_opt::<String, _>("PATH", 'o').name("output").desc("output file path (omit for stdout)");
             } in {{
                 if local_filesystem_paths.len() != disk_image_paths.len() {
@@ -53,4 +52,5 @@ fn main() {
     } = Args::parse();
     let partition_size = mini_fat::partition_size(&path_pairs).unwrap();
     mini_gpt::write_header(&mut output, partition_size).unwrap();
+    mini_fat::write_partition(&mut output, &path_pairs).unwrap();
 }

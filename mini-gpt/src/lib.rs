@@ -79,14 +79,14 @@ impl GptHeader {
         disk_size_in_lba: u64,
         disk_guid: Uuid,
         partition_entry_array_raw: &[u8],
-    ) -> [u8; MIN_HEADER_SIZE as usize] {
+    ) -> [u8; LOGICAL_BLOCK_SIZE as usize] {
         let my_lba: u64 = 1;
         let alternate_lba: u64 = disk_size_in_lba - 1;
         let first_usable_lba: u64 = 2 // mbr and primary gpt header
                 + create::PARTITION_ARRAY_NUM_LBA;
         let last_usable_lba: u64 = disk_size_in_lba - 1 - create::PARTITION_ARRAY_NUM_LBA - 1;
         let partition_entry_lba: u64 = 2; // mbr and primary gpt header
-        let mut raw = [0; MIN_HEADER_SIZE as usize];
+        let mut raw = [0; LOGICAL_BLOCK_SIZE as usize];
         raw[0..8].copy_from_slice(&REQUIRED_SIGNATURE.to_le_bytes());
         raw[8..12].copy_from_slice(&THIS_REVISION.to_le_bytes());
         raw[12..16].copy_from_slice(&MIN_HEADER_SIZE.to_le_bytes());
@@ -101,7 +101,7 @@ impl GptHeader {
         raw[80..84].copy_from_slice(&create::NUMBER_OF_PARTITION_ENTRIES.to_le_bytes());
         raw[84..88].copy_from_slice(&create::SIZE_OF_PARTITION_ENTRY.to_le_bytes());
         raw[88..92].copy_from_slice(&crc32::crc32(partition_entry_array_raw).to_le_bytes());
-        let header_crc32 = crc32::crc32(&raw);
+        let header_crc32 = crc32::crc32(&raw[0..(MIN_HEADER_SIZE as usize)]);
         raw[16..20].copy_from_slice(&header_crc32.to_le_bytes());
         raw
     }
@@ -163,12 +163,9 @@ impl GptHeader {
 
     fn crc32_from_logical_block(logical_block: &[u8], header_size: u32) -> u32 {
         let mut copy = [0; LOGICAL_BLOCK_SIZE];
-        copy[0..header_size as usize].copy_from_slice(logical_block);
+        copy[0..header_size as usize].copy_from_slice(&logical_block[0..(header_size as usize)]);
         // zero-out the crc field of the copy
-        copy[16] = 0;
-        copy[17] = 0;
-        copy[18] = 0;
-        copy[19] = 0;
+        copy[16..20].copy_from_slice(&0u32.to_le_bytes());
         crc32::crc32(&copy[0..(header_size as usize)])
     }
 
@@ -474,10 +471,16 @@ where
 }
 
 #[derive(Debug)]
+struct GptInfoBackupHeader {
+    header: GptHeader,
+    comparison: Result<(), Error>,
+}
+
+#[derive(Debug)]
 pub struct GptInfo {
     mbr: Mbr,
     header: GptHeader,
-    backup_header: GptHeader,
+    backup_header: Result<GptInfoBackupHeader, Error>,
     partition_entry_array: Vec<PartitionEntry>,
 }
 
@@ -515,15 +518,23 @@ where
     if header.my_lba != 1 {
         return Err(Error::UnexpectedMyLba(header.my_lba));
     }
-    // read the backup gpt header
-    handle_read(
-        handle,
-        header.alternate_lba * LOGICAL_BLOCK_SIZE as u64,
-        LOGICAL_BLOCK_SIZE,
-        &mut buf,
-    )?;
-    let backup_header = GptHeader::parse(&buf)?;
-    GptHeader::compare_header_and_backup_header(&header, &backup_header)?;
+    let backup_header = {
+        // read the backup gpt header
+        handle_read(
+            handle,
+            header.alternate_lba * LOGICAL_BLOCK_SIZE as u64,
+            LOGICAL_BLOCK_SIZE,
+            &mut buf,
+        )
+        .and_then(|()| GptHeader::parse(&buf))
+        .map(|backup_header| {
+            let comparison = GptHeader::compare_header_and_backup_header(&header, &backup_header);
+            GptInfoBackupHeader {
+                header: backup_header,
+                comparison,
+            }
+        })
+    };
     // read the partition entry array
     let partition_entry_array_byte_range = header.partition_entry_array_byte_range();
     handle_read(
@@ -533,19 +544,22 @@ where
         &mut buf,
     )?;
     let partition_entry_array = PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
-    // read the backup partition entry array
-    let backup_partition_entry_array_byte_range = backup_header.partition_entry_array_byte_range();
-    handle_read(
-        handle,
-        backup_partition_entry_array_byte_range.start,
-        (backup_partition_entry_array_byte_range.end
-            - backup_partition_entry_array_byte_range.start) as usize,
-        &mut buf,
-    )?;
-    let backup_partition_entry_array =
-        PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
-    if backup_partition_entry_array != partition_entry_array {
-        return Err(Error::BackupPartitionArrayDoesNotMatch);
+    if let Ok(ref backup_header) = backup_header {
+        // read the backup partition entry array
+        let backup_partition_entry_array_byte_range =
+            backup_header.header.partition_entry_array_byte_range();
+        handle_read(
+            handle,
+            backup_partition_entry_array_byte_range.start,
+            (backup_partition_entry_array_byte_range.end
+                - backup_partition_entry_array_byte_range.start) as usize,
+            &mut buf,
+        )?;
+        let backup_partition_entry_array =
+            PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
+        if backup_partition_entry_array != partition_entry_array {
+            return Err(Error::BackupPartitionArrayDoesNotMatch);
+        }
     }
     Ok(GptInfo {
         mbr,

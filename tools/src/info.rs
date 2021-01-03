@@ -5,6 +5,7 @@ use std::fmt;
 struct Args {
     image_filename: String,
     debug: bool,
+    partition_only: bool,
 }
 
 impl Args {
@@ -13,10 +14,12 @@ impl Args {
             let {
                 image_filename = opt_req("PATH", 'i').name("image").desc("path to disk image");
                 debug = flag('d').name("debug").desc("print debugging info");
+                partition_only = flag('p').name("partition-only").desc("expect image to be a partition instead of an entire disk");
             } in {
                 Self {
                     image_filename,
                     debug,
+                    partition_only,
                 }
             }
         })
@@ -27,7 +30,7 @@ impl Args {
 
 #[derive(Debug)]
 struct DisplayInfo {
-    gpt_info: GptInfo,
+    gpt_info: Option<GptInfo>,
     fat_info: FatInfo,
 }
 
@@ -50,14 +53,19 @@ fn main() {
     let Args {
         image_filename,
         debug,
+        partition_only,
     } = Args::parse();
     let mut image_file = File::open(image_filename).expect("unable to open file");
-    let gpt_info = mini_gpt::gpt_info(&mut image_file).unwrap();
-    let fat_info = mini_fat::fat_info(
-        &mut image_file,
-        gpt_info.first_partition_byte_range().unwrap(),
-    )
-    .unwrap();
+    let (first_partition_byte_range, gpt_info) = if partition_only {
+        (0..(image_file.metadata().unwrap().len()), None)
+    } else {
+        let gpt_info = mini_gpt::gpt_info(&mut image_file).unwrap();
+        (
+            gpt_info.first_partition_byte_range().unwrap(),
+            Some(gpt_info),
+        )
+    };
+    let fat_info = mini_fat::fat_info(&mut image_file, first_partition_byte_range).unwrap();
     let display_info = DisplayInfo { gpt_info, fat_info };
     if debug {
         println!("{:#?}", display_info);
