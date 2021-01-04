@@ -13,6 +13,10 @@ description = "Tools for reading disk images with GPT partition tables and FAT f
 meap = "0.4"
 mini_gpt = { version = "0.1", path = "../mini-gpt" }
 mini_fat = { version = "0.1", path = "../mini-fat" }
+anyhow = "1.0"
+
+[features]
+backtrace = [ "mini_gpt/backtrace", "mini_fat/backtrace" ]
 
 [[bin]]
 name = "gpt-fat-disk-image-list"

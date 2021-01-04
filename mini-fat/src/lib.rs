@@ -1,3 +1,5 @@
+pub use anyhow::Error;
+use std::fmt;
 use std::fs::File;
 use std::io;
 use std::ops::Range;
@@ -27,7 +29,7 @@ mod create {
 }
 
 #[derive(Debug)]
-pub enum Error {
+pub enum FatError {
     Io(io::Error),
     UnexpectedNonZero {
         byte_index: usize,
@@ -52,6 +54,14 @@ pub enum Error {
     InvalidFsInfoStrucSignature(u32),
     InvalidFsInfoTrailSignature(u32),
 }
+
+impl fmt::Display for FatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for FatError {}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Bpb {
@@ -103,7 +113,7 @@ impl Bpb {
             )?;
             let backup_bpb = Bpb::parse(&buf)?;
             if backup_bpb != bpb {
-                return Err(Error::BpbDoesNotMatchBackupBpb);
+                return Err(FatError::BpbDoesNotMatchBackupBpb.into());
             }
         }
         Ok(bpb)
@@ -196,7 +206,7 @@ impl Bpb {
             bk_boot_sector = u16::from_le_bytes(raw[50..52].try_into().unwrap());
             for i in 52..64 {
                 if raw[i] != 0 {
-                    return Err(Error::UnexpectedNonZero { byte_index: i });
+                    return Err(FatError::UnexpectedNonZero { byte_index: i }.into());
                 }
             }
             drive_number = raw[64];
@@ -217,27 +227,29 @@ impl Bpb {
             bk_boot_sector = 0;
             drive_number = raw[36];
             if raw[37] != 0 {
-                return Err(Error::UnexpectedNonZero { byte_index: 37 });
+                return Err(FatError::UnexpectedNonZero { byte_index: 37 }.into());
             }
             boot_signature = raw[38];
             volume_id = u32::from_le_bytes(raw[39..43].try_into().unwrap());
             volume_label = String::from_utf8_lossy(&raw[43..54]).to_string();
             file_system_type = String::from_utf8_lossy(&raw[54..62]).to_string();
         } else {
-            return Err(Error::ExactlyOneTotalSectorsFieldMustBeZero {
+            return Err(FatError::ExactlyOneTotalSectorsFieldMustBeZero {
                 total_sectors_16,
                 total_sectors_32,
-            });
+            }
+            .into());
         }
         if (fat_size_16 == 0) == (fat_size_32 == 0) {
-            return Err(Error::ExactlyOneFatSizeMustBeZero {
+            return Err(FatError::ExactlyOneFatSizeMustBeZero {
                 fat_size_16,
                 fat_size_32,
-            });
+            }
+            .into());
         }
         let signature = u16::from_le_bytes(raw[510..512].try_into().unwrap());
         if signature != REQUIRED_SIGNATURE {
-            return Err(Error::InvalidSignature(signature));
+            return Err(FatError::InvalidSignature(signature).into());
         }
         Ok(Self {
             jmp_boot,
@@ -610,8 +622,10 @@ impl FsInfo {
                     None
                 }
             }
-            Err(Error::InvalidFsInfoLeadSignature(_)) => Some(FsInfoWarning::NoBackup),
-            Err(other) => return Err(other),
+            Err(e) => match e.downcast_ref::<FatError>().unwrap() {
+                FatError::InvalidFsInfoLeadSignature(_) => Some(FsInfoWarning::NoBackup),
+                _other => return Err(e),
+            },
         };
         Ok((fs_info, warning))
     }
@@ -620,17 +634,17 @@ impl FsInfo {
         use std::convert::TryInto;
         let lead_signature = u32::from_le_bytes(raw[0..4].try_into().unwrap());
         if lead_signature != FS_INFO_REQUIRED_LEAD_SIGNATURE {
-            return Err(Error::InvalidFsInfoLeadSignature(lead_signature));
+            return Err(FatError::InvalidFsInfoLeadSignature(lead_signature).into());
         }
         let struc_signature = u32::from_le_bytes(raw[484..488].try_into().unwrap());
         if struc_signature != FS_INFO_REQUIRED_STRUC_SIGNATURE {
-            return Err(Error::InvalidFsInfoStrucSignature(struc_signature));
+            return Err(FatError::InvalidFsInfoStrucSignature(struc_signature).into());
         }
         let free_count = u32::from_le_bytes(raw[488..492].try_into().unwrap());
         let next_free = u32::from_le_bytes(raw[492..496].try_into().unwrap());
         let trail_signature = u32::from_le_bytes(raw[508..512].try_into().unwrap());
         if trail_signature != FS_INFO_REQUIRED_TRAIL_SIGNATURE {
-            return Err(Error::InvalidFsInfoTrailSignature(trail_signature));
+            return Err(FatError::InvalidFsInfoTrailSignature(trail_signature).into());
         }
         Ok(Self {
             lead_signature,
@@ -642,7 +656,7 @@ impl FsInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum FatLookupError {
     FreeCluster,
     DefectiveCluster,
@@ -682,10 +696,8 @@ where
     H: io::Seek + io::Read,
 {
     buf.resize(size, 0);
-    handle
-        .seek(io::SeekFrom::Start(offset))
-        .map_err(Error::Io)?;
-    handle.read_exact(buf).map_err(Error::Io)?;
+    handle.seek(io::SeekFrom::Start(offset))?;
+    handle.read_exact(buf)?;
     Ok(())
 }
 
@@ -702,29 +714,23 @@ where
     match fat_type {
         FatType::Fat32 => {
             let base = n as u64 * 4;
-            handle
-                .seek(io::SeekFrom::Start(fat_start + base))
-                .map_err(Error::Io)?;
+            handle.seek(io::SeekFrom::Start(fat_start + base))?;
             let mut buf = [0; 4];
-            handle.read_exact(&mut buf).map_err(Error::Io)?;
+            handle.read_exact(&mut buf)?;
             Ok(u32::from_le_bytes(buf) & 0x0FFFFFFF)
         }
         FatType::Fat16 => {
             let base = n as u64 * 2;
-            handle
-                .seek(io::SeekFrom::Start(fat_start + base))
-                .map_err(Error::Io)?;
+            handle.seek(io::SeekFrom::Start(fat_start + base))?;
             let mut buf = [0; 2];
-            handle.read_exact(&mut buf).map_err(Error::Io)?;
+            handle.read_exact(&mut buf)?;
             Ok(u16::from_le_bytes(buf) as u32)
         }
         FatType::Fat12 => {
             let base = n as u64 + (n as u64 / 2);
-            handle
-                .seek(io::SeekFrom::Start(fat_start + base))
-                .map_err(Error::Io)?;
+            handle.seek(io::SeekFrom::Start(fat_start + base))?;
             let mut buf = [0; 2];
-            handle.read_exact(&mut buf).map_err(Error::Io)?;
+            handle.read_exact(&mut buf)?;
             let entry16 = u16::from_le_bytes(buf);
             if n & 1 == 0 {
                 Ok((entry16 & 0xFFF) as u32)
@@ -792,7 +798,7 @@ where
                 self.current_entry,
                 self.traverser.bpb.maximum_valid_cluster(),
             )
-            .map_err(Error::FatLookup)?
+            .map_err(FatError::FatLookup)?
             {
                 FileFatEntry::EndOfFile => break Ok(None),
                 FileFatEntry::AllocatedCluster(entry) => entry,
@@ -833,7 +839,7 @@ where
             }
         })?;
         if let Some(Some(io_error)) = maybe_maybe_io_error {
-            Err(Error::Io(io_error))
+            Err(io_error.into())
         } else {
             Ok(())
         }
@@ -873,23 +879,23 @@ where
     for component in path.as_ref().components() {
         use path::Component;
         match component {
-            Component::Prefix(_) => return Err(Error::NoSuchFile),
+            Component::Prefix(_) => return Err(FatError::NoSuchFile.into()),
             Component::CurDir => (),
             Component::ParentDir => {
                 directory_stack.pop();
                 if directory_stack.is_empty() {
-                    return Err(Error::InvalidPath);
+                    return Err(FatError::InvalidPath.into());
                 }
             }
             Component::RootDir => {
                 if directory_stack.is_empty() {
-                    return Err(Error::InvalidPath);
+                    return Err(FatError::InvalidPath.into());
                 }
                 directory_stack.truncate(1);
             }
             Component::Normal(os_str) => {
-                let directory = match directory_stack.last().ok_or(Error::InvalidPath)? {
-                    FatFile::Normal(_) => return Err(Error::InvalidPath),
+                let directory = match directory_stack.last().ok_or(FatError::InvalidPath)? {
+                    FatFile::Normal(_) => return Err(FatError::InvalidPath.into()),
                     FatFile::Directory(ref directory) => directory,
                 };
                 let lookup_path = if let Some(entry) =
@@ -904,13 +910,13 @@ where
                         FatFile::Normal(entry.clone())
                     }
                 } else {
-                    return Err(Error::NoSuchFile);
+                    return Err(FatError::NoSuchFile.into());
                 };
                 directory_stack.push(lookup_path);
             }
         }
     }
-    Ok(directory_stack.pop().ok_or(Error::InvalidPath)?)
+    Ok(directory_stack.pop().ok_or(FatError::InvalidPath)?)
 }
 
 pub fn list_file<H, P>(
@@ -943,7 +949,7 @@ where
     let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
     let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
     match lookup_path(&mut traverser, path)? {
-        FatFile::Directory(_) => Err(Error::ExpectedFileFoundDirectory),
+        FatFile::Directory(_) => Err(FatError::ExpectedFileFoundDirectory.into()),
         FatFile::Normal(entry) => traverser
             .traverse(entry.first_cluster)
             .write_data(entry.file_size, output),
@@ -1001,7 +1007,9 @@ fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
 }
 
 mod directory_hierarchy {
-    use super::{create, round_up_to_nearest_cluster_size, Error, PathPair, DIRECTORY_ENTRY_BYTES};
+    use super::{
+        create, round_up_to_nearest_cluster_size, Error, FatError, PathPair, DIRECTORY_ENTRY_BYTES,
+    };
     use std::collections::HashMap;
     use std::fs::File;
     use std::path::{Component, Components};
@@ -1024,7 +1032,7 @@ mod directory_hierarchy {
             let name = os_str
                 .to_str()
                 .ok_or_else(|| {
-                    Error::InvalidDiskPath(
+                    FatError::InvalidDiskPath(
                         "disk image paths must consist of utf-8 characters".to_string(),
                     )
                 })?
@@ -1037,25 +1045,28 @@ mod directory_hierarchy {
                 {
                     Node::Directory(directory) => directory_insert(directory, next, rest, file)?,
                     Node::File(_) => {
-                        return Err(Error::InvalidDiskPath(
+                        return Err(FatError::InvalidDiskPath(
                             "path refers to subdirectory of file".to_string(),
-                        ))
+                        )
+                        .into())
                     }
                 }
             } else {
                 // current component refers to file
                 if directory.contains_key(&name) {
-                    return Err(Error::InvalidDiskPath(
+                    return Err(FatError::InvalidDiskPath(
                         "path refers to existant file or directory".to_string(),
-                    ));
+                    )
+                    .into());
                 }
                 directory.insert(name, Node::File(file));
             }
             Ok(())
         } else {
-            Err(Error::InvalidDiskPath(
+            Err(FatError::InvalidDiskPath(
                 "disk image paths must consist of normal components".to_string(),
-            ))
+            )
+            .into())
         }
     }
 
@@ -1084,15 +1095,16 @@ mod directory_hierarchy {
             } in path_pairs
             {
                 let mut components = in_disk_image.components();
-                let first = components
-                    .next()
-                    .ok_or(Error::InvalidDiskPath("path must not be empty".to_string()))?;
+                let first = components.next().ok_or(FatError::InvalidDiskPath(
+                    "path must not be empty".to_string(),
+                ))?;
                 if first != Component::RootDir {
-                    return Err(Error::InvalidDiskPath(
+                    return Err(FatError::InvalidDiskPath(
                         "paths in disk image must start with root".to_string(),
-                    ));
+                    )
+                    .into());
                 }
-                let first_non_root = components.next().ok_or(Error::InvalidDiskPath(
+                let first_non_root = components.next().ok_or(FatError::InvalidDiskPath(
                     "paths must refer to normal file paths - not root directory".to_string(),
                 ))?;
                 directory_insert(&mut root, first_non_root, components, &in_local_filesystem)?;
@@ -1114,7 +1126,7 @@ mod directory_hierarchy {
                             Ok(metadata) => {
                                 total_file_size += round_up_to_nearest_cluster_size(metadata.len())
                             }
-                            Err(e) => error = Some(Error::Io(e)),
+                            Err(e) => error = Some(e.into()),
                         },
                         Node::Directory(directory) => {
                             total_file_size += round_up_to_nearest_cluster_size(
@@ -1163,9 +1175,8 @@ fn write_zero_sector<H>(handle: &mut H) -> Result<(), Error>
 where
     H: io::Write,
 {
-    handle
-        .write_all(&[0; create::BYTES_PER_SECTOR as usize])
-        .map_err(Error::Io)
+    handle.write_all(&[0; create::BYTES_PER_SECTOR as usize])?;
+    Ok(())
 }
 
 pub fn write_partition<'a, H, I>(handle: &mut H, path_pairs: I) -> Result<(), Error>
@@ -1176,16 +1187,32 @@ where
     use directory_hierarchy::DirectoryHierarchy;
     let hierarchy = DirectoryHierarchy::new(path_pairs)?;
     let bpb_raw = Bpb::new_fat32_raw(&hierarchy)?;
-    let bpb = Bpb::parse(&bpb_raw)?;
+    let bpb = match Bpb::parse(&bpb_raw) {
+        Ok(bpb) => bpb,
+        Err(ref e) => {
+            eprintln!("Failed to parse generated BPB");
+            die(e);
+        }
+    };
     let _fat_type = bpb.fat_type(); // sanity check
     let fs_info_raw = FsInfo::new_raw(0, hierarchy.implied_num_data_clusters()?);
-    let _fs_info = FsInfo::parse(&fs_info_raw); // sanity check
-    handle.write_all(&bpb_raw).map_err(Error::Io)?; // sector 0
-    handle.write_all(&fs_info_raw).map_err(Error::Io)?; // sector 1
+    if let Err(ref e) = FsInfo::parse(&fs_info_raw) {
+        eprintln!("Failed to parse generated FsInfo");
+        die(e);
+    }
+    handle.write_all(&bpb_raw)?; // sector 0
+    handle.write_all(&fs_info_raw)?; // sector 1
     for _ in 2..create::BK_BOOT_SECTOR {
         write_zero_sector(handle)?;
     }
-    handle.write_all(&bpb_raw).map_err(Error::Io)?; // sector 6
-    handle.write_all(&fs_info_raw).map_err(Error::Io)?; // sector 7
+    handle.write_all(&bpb_raw)?; // sector 6
+    handle.write_all(&fs_info_raw)?; // sector 7
     Ok(())
+}
+
+fn die(error: &Error) -> ! {
+    eprintln!("{}", error);
+    #[cfg(feature = "backtrace")]
+    eprintln!("{}", error.backtrace());
+    std::process::exit(1);
 }

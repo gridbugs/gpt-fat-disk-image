@@ -11,3 +11,7 @@ documentation = "https://docs.rs/mini_fat"
 description = "Minimal FAT disk image decoder"
 
 [dependencies]
+anyhow = "1.0"
+
+[features]
+backtrace = []

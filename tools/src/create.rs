@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io;
 use std::process;
 
+mod error;
+
 struct Args {
     path_pairs: Vec<mini_fat::PathPair>,
     output: Box<dyn io::Write>,
@@ -50,7 +52,12 @@ fn main() {
         path_pairs,
         mut output,
     } = Args::parse();
-    let partition_size = mini_fat::partition_size(&path_pairs).unwrap();
+    let partition_size = match mini_fat::partition_size(&path_pairs) {
+        Ok(partition_size) => partition_size,
+        Err(ref e) => error::die(e),
+    };
     mini_gpt::write_header(&mut output, partition_size).unwrap();
-    mini_fat::write_partition(&mut output, &path_pairs).unwrap();
+    if let Err(ref e) = mini_fat::write_partition(&mut output, &path_pairs) {
+        error::die(e);
+    }
 }
