@@ -7,6 +7,7 @@ mod error;
 struct Args {
     path_pairs: Vec<mini_fat::PathPair>,
     output: Box<dyn io::Write>,
+    partition_name: String,
 }
 
 impl Args {
@@ -19,6 +20,10 @@ impl Args {
                 disk_image_paths = opt_multi("PATH", 'd')
                     .name("disk") .desc("paths in disk image where files will be stored (corresponds to -l)");
                 output = opt_opt::<String, _>("PATH", 'o').name("output").desc("output file path (omit for stdout)");
+                partition_name = opt_opt::<String, _>("PARTITION_NAME", 'n')
+                    .name("partition-name")
+                    .desc("name of partition")
+                    .with_default_parse("efi");
             } in {{
                 if local_filesystem_paths.len() != disk_image_paths.len() {
                     eprintln!("Error: -l and -d must be passed the same number of times.");
@@ -39,6 +44,7 @@ impl Args {
                     } else {
                         Box::new(io::stdout())
                     },
+                    partition_name,
                 }
             }}
         })
@@ -51,12 +57,13 @@ fn main() {
     let Args {
         path_pairs,
         mut output,
+        partition_name,
     } = Args::parse();
     let partition_size = match mini_fat::partition_size(&path_pairs) {
         Ok(partition_size) => partition_size,
         Err(ref e) => error::die(e),
     };
-    if let Err(ref e) = mini_gpt::write_header(&mut output, partition_size) {
+    if let Err(ref e) = mini_gpt::write_header(&mut output, partition_size, &partition_name) {
         error::die(e);
     }
     if let Err(ref e) = mini_fat::write_partition(&mut output, &path_pairs) {

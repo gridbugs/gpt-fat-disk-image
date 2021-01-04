@@ -613,7 +613,11 @@ fn disk_size_in_lba(partition_size_in_lba: u64) -> u64 {
         + 1 // backup gpt header
 }
 
-pub fn write_header<H>(handle: &mut H, partition_size_bytes: u64) -> Result<(), Error>
+pub fn write_header<H>(
+    handle: &mut H,
+    partition_size_bytes: u64,
+    partition_name: &str,
+) -> Result<(), Error>
 where
     H: io::Write,
 {
@@ -628,7 +632,7 @@ where
     let partition_entry_array = PartitionEntry::new_array_single_partition_raw(
         partition_size_in_lba,
         Uuid::new_v4(),
-        "efi".to_string(),
+        partition_name.to_string(),
     );
     let gpt_header = GptHeader::new_single_partition_raw(
         disk_size_in_lba,
