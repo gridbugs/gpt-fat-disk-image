@@ -56,7 +56,9 @@ fn main() {
         Ok(partition_size) => partition_size,
         Err(ref e) => error::die(e),
     };
-    mini_gpt::write_header(&mut output, partition_size).unwrap();
+    if let Err(ref e) = mini_gpt::write_header(&mut output, partition_size) {
+        error::die(e);
+    }
     if let Err(ref e) = mini_fat::write_partition(&mut output, &path_pairs) {
         error::die(e);
     }

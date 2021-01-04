@@ -1,3 +1,4 @@
+pub use anyhow::Error;
 use std::fmt;
 use std::io;
 use std::ops::Range;
@@ -37,8 +38,7 @@ mod guid {
 }
 
 #[derive(Debug)]
-pub enum Error {
-    Io(io::Error),
+pub enum GptError {
     InvalidSignature(u64),
     IncorrectRevision(u32),
     InvalidHeaderSize(u32),
@@ -52,6 +52,14 @@ pub enum Error {
     InvalidMbrSignature(u16),
     BackupPartitionArrayDoesNotMatch,
 }
+
+impl fmt::Display for GptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for GptError {}
 
 #[derive(Debug)]
 struct GptHeader {
@@ -110,26 +118,27 @@ impl GptHeader {
         use std::convert::TryInto;
         let signature = u64::from_le_bytes(raw[0..8].try_into().unwrap());
         if signature != REQUIRED_SIGNATURE {
-            return Err(Error::InvalidSignature(signature));
+            return Err(GptError::InvalidSignature(signature).into());
         }
         let revision = u32::from_le_bytes(raw[8..12].try_into().unwrap());
         if revision != THIS_REVISION {
-            return Err(Error::IncorrectRevision(revision));
+            return Err(GptError::IncorrectRevision(revision).into());
         }
         let header_size = u32::from_le_bytes(raw[12..16].try_into().unwrap());
         if header_size < MIN_HEADER_SIZE || header_size as usize > LOGICAL_BLOCK_SIZE {
-            return Err(Error::InvalidHeaderSize(header_size));
+            return Err(GptError::InvalidHeaderSize(header_size).into());
         }
         let header_crc32 = u32::from_le_bytes(raw[16..20].try_into().unwrap());
         let computed_crc32 = Self::crc32_from_logical_block(raw, header_size);
         if computed_crc32 != header_crc32 {
-            return Err(Error::HeaderChecksumMismatch {
+            return Err(GptError::HeaderChecksumMismatch {
                 computed: computed_crc32,
                 expected: header_crc32,
-            });
+            }
+            .into());
         }
         if u32::from_le_bytes(raw[20..24].try_into().unwrap()) != 0 {
-            return Err(Error::UnexpectedNonZeroValue);
+            return Err(GptError::UnexpectedNonZeroValue.into());
         }
         let my_lba = u64::from_le_bytes(raw[24..32].try_into().unwrap());
         let alternate_lba = u64::from_le_bytes(raw[32..40].try_into().unwrap());
@@ -142,7 +151,7 @@ impl GptHeader {
         let partition_entry_array_crc32 = u32::from_le_bytes(raw[88..92].try_into().unwrap());
         for &b in &raw[92..] {
             if b != 0 {
-                return Err(Error::UnexpectedNonZeroValue);
+                return Err(GptError::UnexpectedNonZeroValue.into());
             }
         }
         Ok(Self {
@@ -185,7 +194,7 @@ impl GptHeader {
         {
             Ok(())
         } else {
-            Err(Error::HeaderDoesNotMatchBackup)
+            Err(GptError::HeaderDoesNotMatchBackup.into())
         }
     }
 }
@@ -262,10 +271,11 @@ impl PartitionEntry {
     ) -> Result<impl 'a + Iterator<Item = Self>, Error> {
         let computed_crc32 = crc32::crc32(raw);
         if computed_crc32 != header.partition_entry_array_crc32 {
-            return Err(Error::PartitionEntryArrayChecksumMismatch {
+            return Err(GptError::PartitionEntryArrayChecksumMismatch {
                 computed: computed_crc32,
                 expected: header.partition_entry_array_crc32,
-            });
+            }
+            .into());
         }
         Ok(raw
             .chunks(header.size_of_partition_entry as usize)
@@ -453,7 +463,7 @@ impl Mbr {
                 signature,
             })
         } else {
-            Err(Error::InvalidMbrSignature(signature))
+            Err(GptError::InvalidMbrSignature(signature).into())
         }
     }
 }
@@ -463,10 +473,8 @@ where
     H: io::Seek + io::Read,
 {
     buf.resize(size, 0);
-    handle
-        .seek(io::SeekFrom::Start(offset))
-        .map_err(Error::Io)?;
-    handle.read_exact(buf).map_err(Error::Io)?;
+    handle.seek(io::SeekFrom::Start(offset))?;
+    handle.read_exact(buf)?;
     Ok(())
 }
 
@@ -489,7 +497,7 @@ impl GptInfo {
         let first_partition_entry = self
             .partition_entry_array
             .first()
-            .ok_or(Error::NoPartitions)?;
+            .ok_or(GptError::NoPartitions)?;
         Ok(first_partition_entry.partition_byte_range())
     }
 }
@@ -516,7 +524,7 @@ where
     )?;
     let header = GptHeader::parse(&buf)?;
     if header.my_lba != 1 {
-        return Err(Error::UnexpectedMyLba(header.my_lba));
+        return Err(GptError::UnexpectedMyLba(header.my_lba).into());
     }
     let backup_header = {
         // read the backup gpt header
@@ -558,7 +566,7 @@ where
         let backup_partition_entry_array =
             PartitionEntry::parse_array(&buf, &header)?.collect::<Vec<_>>();
         if backup_partition_entry_array != partition_entry_array {
-            return Err(Error::BackupPartitionArrayDoesNotMatch);
+            return Err(GptError::BackupPartitionArrayDoesNotMatch.into());
         }
     }
     Ok(GptInfo {
@@ -611,9 +619,12 @@ where
 {
     let partition_size_in_lba = size_in_bytes_to_num_logical_blocks(partition_size_bytes);
     let disk_size_in_lba = disk_size_in_lba(partition_size_in_lba);
-    handle
-        .write_all(&Mbr::new_protective_with_disk_size_in_lba(disk_size_in_lba).encode())
-        .map_err(Error::Io)?;
+    let mbr_raw = Mbr::new_protective_with_disk_size_in_lba(disk_size_in_lba).encode();
+    if let Err(ref e) = Mbr::parse(&mbr_raw) {
+        eprintln!("Failed to parse generated MBR");
+        die(e);
+    }
+    handle.write_all(&mbr_raw)?;
     let partition_entry_array = PartitionEntry::new_array_single_partition_raw(
         partition_size_in_lba,
         Uuid::new_v4(),
@@ -624,13 +635,25 @@ where
         Uuid::new_v4(),
         &partition_entry_array,
     );
-    // sanity check
-    let header_parsed = GptHeader::parse(&gpt_header).unwrap();
-    let _partition_entry_array_parsed =
-        PartitionEntry::parse_array(&partition_entry_array, &header_parsed).unwrap();
-    handle.write_all(&gpt_header).map_err(Error::Io)?;
-    handle
-        .write_all(&partition_entry_array)
-        .map_err(Error::Io)?;
+    let header_parsed = match GptHeader::parse(&gpt_header) {
+        Ok(header) => header,
+        Err(ref e) => {
+            eprintln!("Failed to parse generated GPT header");
+            die(e);
+        }
+    };
+    if let Err(ref e) = PartitionEntry::parse_array(&partition_entry_array, &header_parsed) {
+        eprintln!("Failed to parse generated partition entry array");
+        die(e);
+    }
+    handle.write_all(&gpt_header)?;
+    handle.write_all(&partition_entry_array)?;
     Ok(())
+}
+
+fn die(error: &Error) -> ! {
+    eprintln!("{}", error);
+    #[cfg(feature = "backtrace")]
+    eprintln!("{}", error.backtrace());
+    std::process::exit(1);
 }

@@ -30,7 +30,6 @@ mod create {
 
 #[derive(Debug)]
 pub enum FatError {
-    Io(io::Error),
     UnexpectedNonZero {
         byte_index: usize,
     },
@@ -211,6 +210,7 @@ impl Bpb {
             }
             drive_number = raw[64];
             if raw[65] != 0 {
+                // XXX: On some partitions in the wild this is non-zero
                 //return Err(Error::UnexpectedNonZero { byte_index: 65 });
             }
             boot_signature = raw[66];
