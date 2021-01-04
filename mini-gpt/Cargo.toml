@@ -8,8 +8,8 @@ readme = "README.md"
 homepage = "https://github.com/stevebob/gpt-fat-disk-image"
 repository = "https://github.com/stevebob/gpt-fat-disk-image"
 documentation = "https://docs.rs/mini_gpt"
-description = "Minimal GPT disk image decoder"
+description = "Minimal GPT disk image reader and opinionated GPT disk image writer"
 
 
 [dependencies]
-uuid = { version = "0.8", features = ["guid", "v4"] }
+uuid = { version = "0.8", features = ["v4"] }
