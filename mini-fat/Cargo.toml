@@ -12,6 +12,7 @@ description = "Minimal FAT disk image decoder"
 
 [dependencies]
 anyhow = "1.0"
+log = "0.4"
 
 [features]
 backtrace = []

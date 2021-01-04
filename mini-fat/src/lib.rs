@@ -209,9 +209,9 @@ impl Bpb {
                 }
             }
             drive_number = raw[64];
-            if raw[65] != 0 {
-                // XXX: On some partitions in the wild this is non-zero
-                //return Err(Error::UnexpectedNonZero { byte_index: 65 });
+            if raw[65] == 0 {
+                // On some partitions in the wild this is non-zero
+                log::warn!("Unexpected non-zero BPB field at byte offset 65");
             }
             boot_signature = raw[66];
             volume_id = u32::from_le_bytes(raw[67..71].try_into().unwrap());

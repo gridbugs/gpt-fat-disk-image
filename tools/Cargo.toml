@@ -14,6 +14,7 @@ meap = "0.4"
 mini_gpt = { version = "0.1", path = "../mini-gpt" }
 mini_fat = { version = "0.1", path = "../mini-fat" }
 anyhow = "1.0"
+env_logger = "0.8"
 
 [features]
 backtrace = [ "mini_gpt/backtrace", "mini_fat/backtrace" ]

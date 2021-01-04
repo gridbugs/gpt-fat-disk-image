@@ -59,6 +59,7 @@ fn main() {
         mut output,
         partition_name,
     } = Args::parse();
+    env_logger::init();
     let partition_size = match mini_fat::partition_size(&path_pairs) {
         Ok(partition_size) => partition_size,
         Err(ref e) => error::die(e),
