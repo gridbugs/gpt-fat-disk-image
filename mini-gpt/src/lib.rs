@@ -326,9 +326,14 @@ mod mbr {
     pub const PARTITION_RECORD_MAX_SIZE_IN_LBA: u32 = 0xFFFFFFFF;
 }
 
-#[derive(Debug)]
 struct BootCode {
     raw: [u8; mbr::BOOT_CODE_SIZE],
+}
+
+impl fmt::Debug for BootCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "{:?}", &self.raw[..])
+    }
 }
 
 impl Default for BootCode {
