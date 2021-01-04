@@ -8,7 +8,6 @@ readme = "README.md"
 homepage = "https://github.com/stevebob/gpt-fat-disk-image"
 repository = "https://github.com/stevebob/gpt-fat-disk-image"
 documentation = "https://docs.rs/mini_fat"
-description = "Minimal FAT disk image reader and opinionated FAT disk image writer"
+description = "Minimal FAT disk image decoder"
 
 [dependencies]
-error-chain = "0.12"

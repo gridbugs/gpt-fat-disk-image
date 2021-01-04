@@ -52,7 +52,5 @@ fn main() {
     } = Args::parse();
     let partition_size = mini_fat::partition_size(&path_pairs).unwrap();
     mini_gpt::write_header(&mut output, partition_size).unwrap();
-    if let Err(ref e) = mini_fat::write_partition(&mut output, &path_pairs) {
-        eprintln!("error: {}", e);
-    }
+    mini_fat::write_partition(&mut output, &path_pairs).unwrap();
 }

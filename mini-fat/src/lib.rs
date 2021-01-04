@@ -3,10 +3,6 @@ use std::io;
 use std::ops::Range;
 use std::path;
 
-mod errors {
-    error_chain::error_chain! {}
-}
-
 mod create {
     pub const BYTES_PER_SECTOR: u16 = 512;
     pub const SECTORS_PER_CLUSTER: u8 = 1;
@@ -1163,43 +1159,33 @@ where
     Ok(num_clusters * create::BYTES_PER_CLUSTER as u64)
 }
 
-fn write_zero_sector<H>(handle: &mut H) -> errors::Result<()>
+fn write_zero_sector<H>(handle: &mut H) -> Result<(), Error>
 where
     H: io::Write,
 {
-    use errors::*;
     handle
         .write_all(&[0; create::BYTES_PER_SECTOR as usize])
-        .chain_err(|| "Unable to write zero sector")
+        .map_err(Error::Io)
 }
 
-pub fn write_partition<'a, H, I>(handle: &mut H, path_pairs: I) -> errors::Result<()>
+pub fn write_partition<'a, H, I>(handle: &mut H, path_pairs: I) -> Result<(), Error>
 where
     H: io::Write,
     I: IntoIterator<Item = &'a PathPair>,
 {
     use directory_hierarchy::DirectoryHierarchy;
-    use errors::*;
-    let hierarchy = DirectoryHierarchy::new(path_pairs).unwrap();
-    let bpb_raw = Bpb::new_fat32_raw(&hierarchy).unwrap();
-    let bpb = Bpb::parse(&bpb_raw).unwrap();
+    let hierarchy = DirectoryHierarchy::new(path_pairs)?;
+    let bpb_raw = Bpb::new_fat32_raw(&hierarchy)?;
+    let bpb = Bpb::parse(&bpb_raw)?;
     let _fat_type = bpb.fat_type(); // sanity check
-    let fs_info_raw = FsInfo::new_raw(0, hierarchy.implied_num_data_clusters().unwrap());
+    let fs_info_raw = FsInfo::new_raw(0, hierarchy.implied_num_data_clusters()?);
     let _fs_info = FsInfo::parse(&fs_info_raw); // sanity check
-    handle
-        .write_all(&bpb_raw)
-        .chain_err(|| "Unable to write BPB")?; // sector 0
-    handle
-        .write_all(&fs_info_raw)
-        .chain_err(|| "Unable to write FsInfo")?; // sector 1
+    handle.write_all(&bpb_raw).map_err(Error::Io)?; // sector 0
+    handle.write_all(&fs_info_raw).map_err(Error::Io)?; // sector 1
     for _ in 2..create::BK_BOOT_SECTOR {
         write_zero_sector(handle)?;
     }
-    handle
-        .write_all(&bpb_raw)
-        .chain_err(|| "Unable to write backup BPB")?; // sector 6
-    handle
-        .write_all(&fs_info_raw)
-        .chain_err(|| "Unable to write backup FsInfo")?; // sector 7
+    handle.write_all(&bpb_raw).map_err(Error::Io)?; // sector 6
+    handle.write_all(&fs_info_raw).map_err(Error::Io)?; // sector 7
     Ok(())
 }
