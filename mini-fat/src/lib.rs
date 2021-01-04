@@ -209,7 +209,7 @@ impl Bpb {
                 }
             }
             drive_number = raw[64];
-            if raw[65] == 0 {
+            if raw[65] != 0 {
                 // On some partitions in the wild this is non-zero
                 log::warn!("Unexpected non-zero BPB field at byte offset 65");
             }
