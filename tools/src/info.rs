@@ -2,6 +2,8 @@ use mini_fat::FatInfo;
 use mini_gpt::GptInfo;
 use std::fmt;
 
+mod error;
+
 struct Args {
     image_filename: String,
     debug: bool,
@@ -55,17 +57,21 @@ fn main() {
         debug,
         partition_only,
     } = Args::parse();
+    env_logger::init();
     let mut image_file = File::open(image_filename).expect("unable to open file");
     let (first_partition_byte_range, gpt_info) = if partition_only {
         (0..(image_file.metadata().unwrap().len()), None)
     } else {
-        let gpt_info = mini_gpt::gpt_info(&mut image_file).unwrap();
+        let gpt_info = error::or_die(mini_gpt::gpt_info(&mut image_file));
         (
             gpt_info.first_partition_byte_range().unwrap(),
             Some(gpt_info),
         )
     };
-    let fat_info = mini_fat::fat_info(&mut image_file, first_partition_byte_range).unwrap();
+    let fat_info = error::or_die(mini_fat::fat_info(
+        &mut image_file,
+        first_partition_byte_range,
+    ));
     let display_info = DisplayInfo { gpt_info, fat_info };
     if debug {
         println!("{:#?}", display_info);

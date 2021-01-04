@@ -1,3 +1,5 @@
+mod error;
+
 struct Args {
     image_filename: String,
     list_filename: String,
@@ -32,14 +34,18 @@ fn main() {
         list_filename,
         partition_only,
     } = Args::parse();
+    env_logger::init();
     let mut image_file = File::open(image_filename).expect("unable to open file");
     let first_partition_byte_range = if partition_only {
         0..(image_file.metadata().unwrap().len())
     } else {
-        mini_gpt::first_partition_byte_range(&mut image_file).unwrap()
+        error::or_die(mini_gpt::first_partition_byte_range(&mut image_file))
     };
-    match mini_fat::list_file(&mut image_file, first_partition_byte_range, &list_filename).unwrap()
-    {
+    match error::or_die(mini_fat::list_file(
+        &mut image_file,
+        first_partition_byte_range,
+        &list_filename,
+    )) {
         mini_fat::FatFile::Normal(_) => println!("{}", list_filename),
         mini_fat::FatFile::Directory(directory) => {
             for e in directory.entries() {

@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io;
 
+mod error;
+
 struct Args {
     image_filename: String,
     read_filename: String,
@@ -37,13 +39,14 @@ fn main() {
         read_filename,
         mut output,
     } = Args::parse();
+    env_logger::init();
     let mut image_file = File::open(image_filename).expect("unable to open file");
-    let first_partition_byte_range = mini_gpt::first_partition_byte_range(&mut image_file).unwrap();
-    mini_fat::read_file(
+    let first_partition_byte_range =
+        error::or_die(mini_gpt::first_partition_byte_range(&mut image_file));
+    error::or_die(mini_fat::read_file(
         &mut image_file,
         first_partition_byte_range,
         read_filename.as_str(),
         &mut output,
-    )
-    .unwrap();
+    ));
 }

@@ -60,10 +60,7 @@ fn main() {
         partition_name,
     } = Args::parse();
     env_logger::init();
-    let partition_size = match mini_fat::partition_size(&path_pairs) {
-        Ok(partition_size) => partition_size,
-        Err(ref e) => error::die(e),
-    };
+    let partition_size = error::or_die(mini_fat::partition_size(&path_pairs));
     if let Err(ref e) = mini_gpt::write_header(&mut output, partition_size, &partition_name) {
         error::die(e);
     }
