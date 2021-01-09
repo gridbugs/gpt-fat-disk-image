@@ -710,6 +710,7 @@ fn fat_entry_of_nth_cluster<H>(
 where
     H: io::Seek + io::Read,
 {
+    // The first 2 entries of the FAT are unused
     debug_assert!(n >= 2);
     match fat_type {
         FatType::Fat32 => {
@@ -803,6 +804,7 @@ where
                 FileFatEntry::EndOfFile => break Ok(None),
                 FileFatEntry::AllocatedCluster(entry) => entry,
             };
+            // Subtract 2 because the first cluster is cluster number 2
             let cluster_start = self.traverser.partition_byte_start
                 + self.traverser.bpb.data_offset()
                 + (entry as u64 - 2) * self.traverser.bpb.bytes_per_cluster() as u64;
@@ -1010,20 +1012,48 @@ mod directory_hierarchy {
     use super::{
         create, round_up_to_nearest_cluster_size, Error, FatError, PathPair, DIRECTORY_ENTRY_BYTES,
     };
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::fs::File;
     use std::path::{Component, Components};
 
-    pub type Directory<'a> = HashMap<String, Node<'a>>;
+    pub type Directory<'a, T> = BTreeMap<String, AnnotatedNode<'a, T>>;
 
     #[derive(Debug)]
-    pub enum Node<'a> {
-        Directory(Directory<'a>),
+    pub enum Node<'a, T> {
+        Directory(Directory<'a, T>),
         File(&'a File),
     }
 
+    impl<'a, T> Node<'a, T> {
+        fn size_in_clusters(&self) -> Result<u32, Error> {
+            let size_in_bytes_rounded_up = match self {
+                Node::Directory(directory) => round_up_to_nearest_cluster_size(
+                    directory.len() as u64 * DIRECTORY_ENTRY_BYTES as u64,
+                ) as u32,
+                Node::File(file) => round_up_to_nearest_cluster_size(file.metadata()?.len()) as u32,
+            };
+            debug_assert!(size_in_bytes_rounded_up % create::BYTES_PER_CLUSTER == 0);
+            Ok(size_in_bytes_rounded_up / create::BYTES_PER_CLUSTER)
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct AnnotatedNode<'a, T> {
+        pub annotation: T,
+        pub node: Node<'a, T>,
+    }
+
+    impl<'a> AnnotatedNode<'a, ()> {
+        fn empty_directory_unit_annotation() -> Self {
+            Self {
+                node: Node::Directory(Directory::default()),
+                annotation: (),
+            }
+        }
+    }
+
     fn directory_insert<'a>(
-        directory: &mut Directory<'a>,
+        directory: &mut Directory<'a, ()>,
         current: Component,
         mut rest: Components,
         file: &'a File,
@@ -1041,9 +1071,12 @@ mod directory_hierarchy {
                 // current component refers to directory
                 match directory
                     .entry(name)
-                    .or_insert_with(|| Node::Directory(Directory::default()))
+                    .or_insert_with(AnnotatedNode::empty_directory_unit_annotation)
+                    .node
                 {
-                    Node::Directory(directory) => directory_insert(directory, next, rest, file)?,
+                    Node::Directory(ref mut directory) => {
+                        directory_insert(directory, next, rest, file)?
+                    }
                     Node::File(_) => {
                         return Err(FatError::InvalidDiskPath(
                             "path refers to subdirectory of file".to_string(),
@@ -1059,7 +1092,13 @@ mod directory_hierarchy {
                     )
                     .into());
                 }
-                directory.insert(name, Node::File(file));
+                directory.insert(
+                    name,
+                    AnnotatedNode {
+                        node: Node::File(file),
+                        annotation: (),
+                    },
+                );
             }
             Ok(())
         } else {
@@ -1070,17 +1109,49 @@ mod directory_hierarchy {
         }
     }
 
-    fn directory_for_each<'a, F: FnMut(&Node<'a>)>(directory: &Directory<'a>, f: &mut F) {
+    fn directory_for_each<'a, T, F: FnMut(&AnnotatedNode<'a, T>)>(
+        directory: &Directory<'a, T>,
+        f: &mut F,
+    ) {
         directory.values().for_each(|node| {
             f(node);
-            if let Node::Directory(subdirectory) = node {
+            if let Node::Directory(ref subdirectory) = node.node {
                 directory_for_each(subdirectory, f);
             }
         })
     }
 
+    #[derive(Debug, Default)]
+    pub struct ClusterInfo {
+        pub start: u32,
+        pub count: u32,
+    }
+
+    fn directory_annotate_with_cluster_info<'a>(
+        directory: Directory<'a, ()>,
+        next_start_cluster: &mut u32,
+    ) -> Result<Directory<'a, ClusterInfo>, Error> {
+        let mut out: Directory<'a, ClusterInfo> = Default::default();
+        for (file_name, annotated_node) in directory {
+            let start = *next_start_cluster;
+            let count = annotated_node.node.size_in_clusters()?;
+            *next_start_cluster += count;
+            let annotation = ClusterInfo { start, count };
+            let node = match annotated_node.node {
+                Node::Directory(directory) => Node::Directory(
+                    directory_annotate_with_cluster_info(directory, next_start_cluster)?,
+                ),
+                Node::File(file) => Node::File(file),
+            };
+            let annotated_node = AnnotatedNode { node, annotation };
+            out.insert(file_name, annotated_node);
+        }
+        Ok(out)
+    }
+
+    #[derive(Debug)]
     pub struct DirectoryHierarchy<'a> {
-        root: Directory<'a>,
+        root: Directory<'a, ClusterInfo>,
     }
 
     impl<'a> DirectoryHierarchy<'a> {
@@ -1088,7 +1159,7 @@ mod directory_hierarchy {
         where
             I: IntoIterator<Item = &'a PathPair>,
         {
-            let mut root = HashMap::new();
+            let mut root_unsized = Default::default();
             for PathPair {
                 in_local_filesystem,
                 in_disk_image,
@@ -1107,50 +1178,55 @@ mod directory_hierarchy {
                 let first_non_root = components.next().ok_or(FatError::InvalidDiskPath(
                     "paths must refer to normal file paths - not root directory".to_string(),
                 ))?;
-                directory_insert(&mut root, first_non_root, components, &in_local_filesystem)?;
+                directory_insert(
+                    &mut root_unsized,
+                    first_non_root,
+                    components,
+                    &in_local_filesystem,
+                )?;
             }
-            Ok(Self { root })
+            // The first cluster will be cluster 2. The root directory will always be the first
+            // file visited by directory_map.
+            let mut next_start_cluster = 2;
+            let root = directory_annotate_with_cluster_info(root_unsized, &mut next_start_cluster)?;
+            let out = Self { root };
+            Ok(out)
         }
 
-        pub fn for_each<F: FnMut(&Node<'a>)>(&self, mut f: F) {
+        pub fn for_each<F: FnMut(&AnnotatedNode<'a, ClusterInfo>)>(&self, mut f: F) {
             directory_for_each(&self.root, &mut f);
         }
 
         pub fn implied_num_data_clusters(&self) -> Result<u32, Error> {
             let mut total_file_size = 0;
             let mut error = None;
-            self.for_each(|node| {
+            self.for_each(|annotated_node| {
                 if error.is_none() {
-                    match node {
-                        Node::File(file) => match file.metadata() {
-                            Ok(metadata) => {
-                                total_file_size += round_up_to_nearest_cluster_size(metadata.len())
-                            }
-                            Err(e) => error = Some(e.into()),
-                        },
-                        Node::Directory(directory) => {
-                            total_file_size += round_up_to_nearest_cluster_size(
-                                directory.len() as u64 * DIRECTORY_ENTRY_BYTES as u64,
-                            )
+                    match annotated_node.node.size_in_clusters() {
+                        Ok(size_in_clusters) => {
+                            total_file_size += size_in_clusters * create::BYTES_PER_CLUSTER
                         }
+                        Err(e) => error = Some(e),
                     }
                 }
             });
             if let Some(e) = error {
                 return Err(e);
             }
-            debug_assert!(total_file_size % create::BYTES_PER_CLUSTER as u64 == 0);
+            debug_assert!(total_file_size % create::BYTES_PER_CLUSTER == 0);
             total_file_size =
-                total_file_size.max(create::MIN_NUM_CLUSTERS * create::BYTES_PER_CLUSTER as u64);
-            let num_clusters = total_file_size / create::BYTES_PER_CLUSTER as u64;
-            assert!(num_clusters <= u32::MAX as u64);
+                total_file_size.max(create::MIN_NUM_CLUSTERS as u32 * create::BYTES_PER_CLUSTER);
+            let num_clusters = total_file_size / create::BYTES_PER_CLUSTER;
+            assert!(num_clusters <= u32::MAX);
             Ok(num_clusters as u32)
         }
 
         pub fn implied_total_num_clusters(&self) -> Result<u64, Error> {
             let num_clusters = self.implied_num_data_clusters()? as u64;
+            // Add 2 to the number of clusters to account for the fact that the first 2 FAT entries
+            // are unused.
             let fat_size =
-                num_clusters * create::FAT_ENTRY_SIZE_BYTES as u64 * create::NUM_FATS as u64;
+                (num_clusters + 2) * create::FAT_ENTRY_SIZE_BYTES as u64 * create::NUM_FATS as u64;
             let reserved_size =
                 create::RESERVED_SECTOR_COUNT as u64 * create::BYTES_PER_SECTOR as u64;
             let num_bytes = num_clusters * create::BYTES_PER_CLUSTER as u64
@@ -1176,6 +1252,46 @@ where
     H: io::Write,
 {
     handle.write_all(&[0; create::BYTES_PER_SECTOR as usize])?;
+    Ok(())
+}
+
+fn write_fat32_fat<H>(
+    handle: &mut H,
+    directory_hierarchy: &directory_hierarchy::DirectoryHierarchy,
+) -> Result<(), Error>
+where
+    H: io::Write,
+{
+    const FAT32_ENTRY_END_OF_FILE: u32 = 0xFFFFFFFF;
+    let mut error = None;
+    // Skip the first 2 entries
+    handle.write_all(&0u32.to_le_bytes())?;
+    handle.write_all(&0u32.to_le_bytes())?;
+    let mut entry_count = 2;
+    directory_hierarchy.for_each(|annotated_node| {
+        if error.is_some() {
+            return;
+        }
+        for cluster_index in (annotated_node.annotation.start + 1)
+            ..(annotated_node.annotation.start + annotated_node.annotation.count)
+        {
+            if let Err(e) = handle.write_all(&cluster_index.to_le_bytes()) {
+                error = Some(e);
+                return;
+            }
+        }
+        if let Err(e) = handle.write_all(&FAT32_ENTRY_END_OF_FILE.to_le_bytes()) {
+            error = Some(e);
+        }
+        entry_count += annotated_node.annotation.count;
+    });
+    if let Some(e) = error {
+        return Err(e.into());
+    }
+    let remaining_fat_entry_count = directory_hierarchy.implied_num_data_clusters()? - entry_count;
+    for _ in 0..remaining_fat_entry_count {
+        handle.write_all(&0u32.to_le_bytes())?;
+    }
     Ok(())
 }
 
@@ -1207,6 +1323,9 @@ where
     }
     handle.write_all(&bpb_raw)?; // sector 6
     handle.write_all(&fs_info_raw)?; // sector 7
+    for _ in 0..create::NUM_FATS {
+        write_fat32_fat(handle, &hierarchy)?;
+    }
     Ok(())
 }
 
