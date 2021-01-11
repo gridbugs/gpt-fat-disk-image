@@ -746,34 +746,100 @@ struct Traverser<'a, H>
 where
     H: io::Seek + io::Read,
 {
-    buf: &'a mut Vec<u8>,
+    buf: Vec<u8>,
     handle: &'a mut H,
     partition_byte_start: u64,
-    bpb: &'a Bpb,
+    bpb: Bpb,
 }
 
 impl<'a, H> Traverser<'a, H>
 where
     H: io::Seek + io::Read,
 {
-    fn new(
-        handle: &'a mut H,
-        buf: &'a mut Vec<u8>,
-        bpb: &'a Bpb,
-        partition_byte_start: u64,
-    ) -> Self {
-        Traverser {
+    fn new(handle: &'a mut H, partition_byte_start: u64) -> Result<Self, Error> {
+        let mut buf = Vec::new();
+        let bpb = Bpb::read(handle, partition_byte_start, &mut buf)?;
+        Ok(Traverser {
             buf,
             handle,
             partition_byte_start,
             bpb,
-        }
+        })
     }
+
     fn traverse<'b>(&'b mut self, cluster_index: u32) -> Traverse<'a, 'b, H> {
         Traverse {
             traverser: self,
             current_entry: cluster_index,
         }
+    }
+
+    fn read_root_directory(&mut self) -> Result<Directory, Error>
+    where
+        H: io::Seek + io::Read,
+    {
+        match self.bpb.fat_type() {
+            FatType::Fat32 => Directory::from_traverser(self, self.bpb.root_cluster),
+            FatType::Fat12 | FatType::Fat16 => {
+                handle_read(
+                    self.handle,
+                    self.partition_byte_start + self.bpb.root_directory_offset(),
+                    self.bpb.root_directory_size(),
+                    &mut self.buf,
+                )?;
+                let directory = Directory::from_contiguous(&mut self.buf);
+                Ok(directory)
+            }
+        }
+    }
+
+    fn lookup_path<P>(&mut self, path: P) -> Result<FatFile, Error>
+    where
+        H: io::Seek + io::Read,
+        P: AsRef<path::Path>,
+    {
+        let mut directory_stack = vec![FatFile::Directory(self.read_root_directory()?)];
+        for component in path.as_ref().components() {
+            use path::Component;
+            match component {
+                Component::Prefix(_) => return Err(FatError::NoSuchFile.into()),
+                Component::CurDir => (),
+                Component::ParentDir => {
+                    directory_stack.pop();
+                    if directory_stack.is_empty() {
+                        return Err(FatError::InvalidPath.into());
+                    }
+                }
+                Component::RootDir => {
+                    if directory_stack.is_empty() {
+                        return Err(FatError::InvalidPath.into());
+                    }
+                    directory_stack.truncate(1);
+                }
+                Component::Normal(os_str) => {
+                    let directory = match directory_stack.last().ok_or(FatError::InvalidPath)? {
+                        FatFile::Normal(_) => return Err(FatError::InvalidPath.into()),
+                        FatFile::Directory(ref directory) => directory,
+                    };
+                    let lookup_path = if let Some(entry) =
+                        directory.find_entry(os_str.to_string_lossy().to_string().as_str())
+                    {
+                        if entry.is_directory() {
+                            FatFile::Directory(Directory::from_traverser(
+                                self,
+                                entry.first_cluster,
+                            )?)
+                        } else {
+                            FatFile::Normal(entry.clone())
+                        }
+                    } else {
+                        return Err(FatError::NoSuchFile.into());
+                    };
+                    directory_stack.push(lookup_path);
+                }
+            }
+        }
+        Ok(directory_stack.pop().ok_or(FatError::InvalidPath)?)
     }
 }
 
@@ -848,113 +914,42 @@ where
     }
 }
 
-fn read_root_directory<H>(traverser: &mut Traverser<H>) -> Result<Directory, Error>
-where
-    H: io::Seek + io::Read,
-{
-    match traverser.bpb.fat_type() {
-        FatType::Fat32 => Directory::from_traverser(traverser, traverser.bpb.root_cluster),
-        FatType::Fat12 | FatType::Fat16 => {
-            handle_read(
-                traverser.handle,
-                traverser.partition_byte_start + traverser.bpb.root_directory_offset(),
-                traverser.bpb.root_directory_size(),
-                traverser.buf,
-            )?;
-            let directory = Directory::from_contiguous(traverser.buf);
-            Ok(directory)
-        }
-    }
-}
-
 pub enum FatFile {
     Directory(Directory),
     Normal(DirectoryEntry),
 }
 
-fn lookup_path<H, P>(traverser: &mut Traverser<H>, path: P) -> Result<FatFile, Error>
+pub struct FatReader<'a, H>(Traverser<'a, H>)
+where
+    H: io::Seek + io::Read;
+
+impl<'a, H> FatReader<'a, H>
 where
     H: io::Seek + io::Read,
-    P: AsRef<path::Path>,
 {
-    let mut directory_stack = vec![FatFile::Directory(read_root_directory(traverser)?)];
-    for component in path.as_ref().components() {
-        use path::Component;
-        match component {
-            Component::Prefix(_) => return Err(FatError::NoSuchFile.into()),
-            Component::CurDir => (),
-            Component::ParentDir => {
-                directory_stack.pop();
-                if directory_stack.is_empty() {
-                    return Err(FatError::InvalidPath.into());
-                }
-            }
-            Component::RootDir => {
-                if directory_stack.is_empty() {
-                    return Err(FatError::InvalidPath.into());
-                }
-                directory_stack.truncate(1);
-            }
-            Component::Normal(os_str) => {
-                let directory = match directory_stack.last().ok_or(FatError::InvalidPath)? {
-                    FatFile::Normal(_) => return Err(FatError::InvalidPath.into()),
-                    FatFile::Directory(ref directory) => directory,
-                };
-                let lookup_path = if let Some(entry) =
-                    directory.find_entry(os_str.to_string_lossy().to_string().as_str())
-                {
-                    if entry.is_directory() {
-                        FatFile::Directory(Directory::from_traverser(
-                            traverser,
-                            entry.first_cluster,
-                        )?)
-                    } else {
-                        FatFile::Normal(entry.clone())
-                    }
-                } else {
-                    return Err(FatError::NoSuchFile.into());
-                };
-                directory_stack.push(lookup_path);
-            }
-        }
+    pub fn new(handle: &'a mut H, partition_byte_range: Range<u64>) -> Result<Self, Error> {
+        Traverser::new(handle, partition_byte_range.start).map(Self)
     }
-    Ok(directory_stack.pop().ok_or(FatError::InvalidPath)?)
-}
 
-pub fn list_file<H, P>(
-    handle: &mut H,
-    partition_byte_range: Range<u64>,
-    path: P,
-) -> Result<FatFile, Error>
-where
-    H: io::Seek + io::Read,
-    P: AsRef<path::Path>,
-{
-    let mut buf = Vec::new();
-    let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
-    let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
-    lookup_path(&mut traverser, path)
-}
+    pub fn lookup<P>(&mut self, path: P) -> Result<FatFile, Error>
+    where
+        P: AsRef<path::Path>,
+    {
+        self.0.lookup_path(path)
+    }
 
-pub fn read_file<H, O, P>(
-    handle: &mut H,
-    partition_byte_range: Range<u64>,
-    path: P,
-    output: &mut O,
-) -> Result<(), Error>
-where
-    H: io::Seek + io::Read,
-    O: io::Write,
-    P: AsRef<path::Path>,
-{
-    let mut buf = Vec::new();
-    let bpb = Bpb::read(handle, partition_byte_range.start, &mut buf)?;
-    let mut traverser = Traverser::new(handle, &mut buf, &bpb, partition_byte_range.start);
-    match lookup_path(&mut traverser, path)? {
-        FatFile::Directory(_) => Err(FatError::ExpectedFileFoundDirectory.into()),
-        FatFile::Normal(entry) => traverser
-            .traverse(entry.first_cluster)
-            .write_data(entry.file_size, output),
+    pub fn read<P, O>(&mut self, path: P, output: &mut O) -> Result<(), Error>
+    where
+        P: AsRef<path::Path>,
+        O: io::Write,
+    {
+        match self.lookup(path)? {
+            FatFile::Directory(_) => Err(FatError::ExpectedFileFoundDirectory.into()),
+            FatFile::Normal(entry) => self
+                .0
+                .traverse(entry.first_cluster)
+                .write_data(entry.file_size, output),
+        }
     }
 }
 

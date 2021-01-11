@@ -41,11 +41,11 @@ fn main() {
     } else {
         error::or_die(mini_gpt::first_partition_byte_range(&mut image_file))
     };
-    match error::or_die(mini_fat::list_file(
+    let mut reader = error::or_die(mini_fat::FatReader::new(
         &mut image_file,
         first_partition_byte_range,
-        &list_filename,
-    )) {
+    ));
+    match error::or_die(reader.lookup(&list_filename)) {
         mini_fat::FatFile::Normal(_) => println!("{}", list_filename),
         mini_fat::FatFile::Directory(directory) => {
             for e in directory.entries() {

@@ -43,10 +43,9 @@ fn main() {
     let mut image_file = File::open(image_filename).expect("unable to open file");
     let first_partition_byte_range =
         error::or_die(mini_gpt::first_partition_byte_range(&mut image_file));
-    error::or_die(mini_fat::read_file(
+    let mut reader = error::or_die(mini_fat::FatReader::new(
         &mut image_file,
         first_partition_byte_range,
-        read_filename.as_str(),
-        &mut output,
     ));
+    error::or_die(reader.read(&read_filename, &mut output));
 }
