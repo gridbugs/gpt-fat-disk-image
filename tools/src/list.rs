@@ -127,7 +127,7 @@ fn recursive_list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
                 for e in directory.entries() {
                     let name = e.name();
                     if !is_current_or_parent(name) || show_current_and_parent {
-                        println!("  {}", name);
+                        println!("{}", name);
                     }
                     if e.is_directory() {
                         if !is_current_or_parent(name) {
