@@ -60,13 +60,27 @@ fn main() {
             mini_fat::FatFile::Directory(directory) => {
                 for e in directory.entries() {
                     let name = e.name();
-                    if name != "." && name != ".." {
-                        println!("{}", name);
-                    }
+                    println!("{}", name);
                 }
             }
         }
     }
+}
+
+fn format_path(path: &path::Path) -> String {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    let mut components = path.components().collect::<VecDeque<_>>();
+    if let Some(first) = components.iter().next() {
+        if first == &Component::RootDir {
+            components.pop_front();
+        }
+    }
+    let strings = components
+        .iter()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    format!("/{}", strings.join("/"))
 }
 
 fn recursive_list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
@@ -80,19 +94,13 @@ fn recursive_list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
         match reader.lookup(&path)? {
             mini_fat::FatFile::Normal(_) => println!("{}", path.to_string_lossy()),
             mini_fat::FatFile::Directory(directory) => {
-                let path_string = path.to_string_lossy().to_string();
-                println!("{}:", path_string);
+                println!("{}:", format_path(&path));
                 for e in directory.entries() {
                     let name = e.name();
-                    if name != "." && name != ".." {
-                        println!("  {}", name);
-                        if e.is_directory() {
-                            let path_string = if path_string == "/" {
-                                "".into()
-                            } else {
-                                path_string.clone()
-                            };
-                            queue.push_back(format!("{}/{}", path_string, name).into());
+                    println!("  {}", name);
+                    if e.is_directory() {
+                        if name != "." && name != ".." {
+                            queue.push_back(format!("{}/{}", format_path(&path), name).into());
                         }
                     }
                 }
