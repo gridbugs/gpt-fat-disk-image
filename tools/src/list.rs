@@ -57,25 +57,11 @@ fn main() {
         &mut image_file,
         first_partition_byte_range,
     ));
-    if recursive {
-        error::or_die(recursive_list(
-            &mut reader,
-            &list_filename,
-            show_current_and_parent,
-        ));
+    error::or_die(if recursive {
+        recursive_list(&mut reader, &list_filename, show_current_and_parent)
     } else {
-        match error::or_die(reader.lookup(&list_filename)) {
-            mini_fat::FatFile::Normal(_) => println!("{}", list_filename),
-            mini_fat::FatFile::Directory(directory) => {
-                for e in directory.entries() {
-                    let name = e.name();
-                    if !is_current_or_parent(name) || show_current_and_parent {
-                        println!("{}", name);
-                    }
-                }
-            }
-        }
-    }
+        list(&mut reader, &list_filename, show_current_and_parent)
+    });
 }
 
 fn format_path(path: &path::Path) -> String {
@@ -96,6 +82,33 @@ fn format_path(path: &path::Path) -> String {
 
 fn is_current_or_parent(name: &str) -> bool {
     name == "." || name == ".."
+}
+
+fn list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
+    reader: &mut mini_fat::FatReader<H>,
+    path: P,
+    show_current_and_parent: bool,
+) -> Result<(), mini_fat::Error> {
+    match reader.lookup(&path)? {
+        mini_fat::FatFile::Normal(_) => {
+            println!(
+                "{}",
+                path.as_ref()
+                    .file_name()
+                    .expect("no filename in path")
+                    .to_string_lossy()
+            )
+        }
+        mini_fat::FatFile::Directory(directory) => {
+            for e in directory.entries() {
+                let name = e.name();
+                if !is_current_or_parent(name) || show_current_and_parent {
+                    println!("{}", name);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn recursive_list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
