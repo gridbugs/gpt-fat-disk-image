@@ -8,6 +8,7 @@ struct Args {
     list_filename: String,
     partition_only: bool,
     recursive: bool,
+    show_current_and_parent: bool,
 }
 
 impl Args {
@@ -19,12 +20,15 @@ impl Args {
                     .with_default_parse("/");
                 partition_only = flag('p').name("partition-only").desc("expect image to be a partition instead of an entire disk");
                 recursive = flag('r').name("recursive").desc("recursively list directories");
+                show_current_and_parent = flag('s').name("show-current-and-parent")
+                    .desc("show the current and parent directory entries if present");
             } in {
                 Self {
                     image_filename,
                     list_filename,
                     partition_only,
                     recursive,
+                    show_current_and_parent,
                 }
             }
         })
@@ -40,6 +44,7 @@ fn main() {
         list_filename,
         partition_only,
         recursive,
+        show_current_and_parent,
     } = Args::parse();
     env_logger::init();
     let mut image_file = File::open(image_filename).expect("unable to open file");
@@ -53,14 +58,20 @@ fn main() {
         first_partition_byte_range,
     ));
     if recursive {
-        error::or_die(recursive_list(&mut reader, &list_filename));
+        error::or_die(recursive_list(
+            &mut reader,
+            &list_filename,
+            show_current_and_parent,
+        ));
     } else {
         match error::or_die(reader.lookup(&list_filename)) {
             mini_fat::FatFile::Normal(_) => println!("{}", list_filename),
             mini_fat::FatFile::Directory(directory) => {
                 for e in directory.entries() {
                     let name = e.name();
-                    println!("{}", name);
+                    if !is_current_or_parent(name) || show_current_and_parent {
+                        println!("{}", name);
+                    }
                 }
             }
         }
@@ -83,9 +94,14 @@ fn format_path(path: &path::Path) -> String {
     format!("/{}", strings.join("/"))
 }
 
+fn is_current_or_parent(name: &str) -> bool {
+    name == "." || name == ".."
+}
+
 fn recursive_list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
     reader: &mut mini_fat::FatReader<H>,
     path: P,
+    show_current_and_parent: bool,
 ) -> Result<(), mini_fat::Error> {
     use std::collections::VecDeque;
     let mut queue = VecDeque::new();
@@ -97,9 +113,11 @@ fn recursive_list<H: io::Seek + io::Read, P: AsRef<path::Path>>(
                 println!("{}:", format_path(&path));
                 for e in directory.entries() {
                     let name = e.name();
-                    println!("  {}", name);
+                    if !is_current_or_parent(name) || show_current_and_parent {
+                        println!("  {}", name);
+                    }
                     if e.is_directory() {
-                        if name != "." && name != ".." {
+                        if !is_current_or_parent(name) {
                             queue.push_back(format!("{}/{}", format_path(&path), name).into());
                         }
                     }
