@@ -323,7 +323,7 @@ impl Bpb {
 
     fn root_directory_size(&self) -> usize {
         debug_assert!((self.fat_type() == FatType::Fat32) == (self.root_entry_count == 0));
-        self.root_entry_count as usize * DIRECTORY_ENTRY_BYTES
+        self.root_entry_count as usize * DIRECTORY_ENTRY_BYTES as usize
     }
 
     fn root_directory_offset(&self) -> u64 {
@@ -476,7 +476,8 @@ pub struct Directory {
     entries: Vec<DirectoryEntry>,
 }
 
-const DIRECTORY_ENTRY_BYTES: usize = 32;
+const DIRECTORY_ENTRY_BYTES: u32 = 32;
+const NUM_CHARS_PER_LONG_DIRECTORY_ENTRY: u32 = 13;
 const UNUSED_ENTRY_PREFIX: u8 = 0xE5;
 const END_OF_DIRECTORY_PREFIX: u8 = 0;
 
@@ -500,7 +501,7 @@ impl Directory {
     }
 
     fn raw_from_contiguous<'a>(raw: &'a [u8]) -> impl 'a + Iterator<Item = RawDirectoryEntry> {
-        raw.chunks(DIRECTORY_ENTRY_BYTES)
+        raw.chunks(DIRECTORY_ENTRY_BYTES as usize)
             .take_while(|raw_entry| raw_entry[0] != END_OF_DIRECTORY_PREFIX)
             .filter(|raw_entry| raw_entry[0] != UNUSED_ENTRY_PREFIX)
             .map(RawDirectoryEntry::parse)
@@ -1006,12 +1007,24 @@ fn round_up_to_nearest_cluster_size(size: u64) -> u64 {
 mod directory_hierarchy {
     use super::{
         create, round_up_to_nearest_cluster_size, Error, FatError, PathPair, DIRECTORY_ENTRY_BYTES,
+        NUM_CHARS_PER_LONG_DIRECTORY_ENTRY,
     };
     use std::collections::BTreeMap;
     use std::fs::File;
     use std::path::{Component, Components};
 
     pub type Directory<'a, T> = BTreeMap<String, AnnotatedNode<'a, T>>;
+
+    fn directory_size_in_bytes<T>(directory: &Directory<T>) -> u32 {
+        directory
+            .keys()
+            .map(|name| {
+                let num_long_directory_entries =
+                    ((name.len() as u32 - 1) / NUM_CHARS_PER_LONG_DIRECTORY_ENTRY) + 1;
+                (num_long_directory_entries + 1) * DIRECTORY_ENTRY_BYTES
+            })
+            .sum()
+    }
 
     #[derive(Debug)]
     pub enum Node<'a, T> {
@@ -1022,13 +1035,13 @@ mod directory_hierarchy {
     impl<'a, T> Node<'a, T> {
         fn size_in_clusters(&self) -> Result<u32, Error> {
             let size_in_bytes_rounded_up = match self {
-                Node::Directory(directory) => round_up_to_nearest_cluster_size(
-                    directory.len() as u64 * DIRECTORY_ENTRY_BYTES as u64,
-                ) as u32,
-                Node::File(file) => round_up_to_nearest_cluster_size(file.metadata()?.len()) as u32,
+                Node::Directory(directory) => {
+                    round_up_to_nearest_cluster_size(directory_size_in_bytes(directory) as u64)
+                }
+                Node::File(file) => round_up_to_nearest_cluster_size(file.metadata()?.len()),
             };
-            debug_assert!(size_in_bytes_rounded_up % create::BYTES_PER_CLUSTER == 0);
-            Ok(size_in_bytes_rounded_up / create::BYTES_PER_CLUSTER)
+            debug_assert!(size_in_bytes_rounded_up % create::BYTES_PER_CLUSTER as u64 == 0);
+            Ok((size_in_bytes_rounded_up / create::BYTES_PER_CLUSTER as u64) as u32)
         }
     }
 
