@@ -398,12 +398,15 @@ enum RawDirectoryEntry {
 }
 
 impl RawDirectoryEntry {
-    fn parse(raw: &[u8]) -> Self {
+    fn parse(raw: &[u8]) -> Result<Self, Error> {
         use std::convert::TryInto;
         let attributes = raw[11];
-        if attributes == directory_attributes::LONG_NAME {
+        let entry = if attributes == directory_attributes::LONG_NAME {
             let order = raw[0];
             let name1 = &raw[1..11];
+            if raw[12] != 0 {
+                return Err(FatError::UnexpectedNonZero { byte_index: 12 }.into());
+            }
             let checksum = raw[13];
             let name2 = &raw[14..26];
             let name3 = &raw[28..32];
@@ -448,7 +451,8 @@ impl RawDirectoryEntry {
                 first_cluster,
                 file_size,
             })
-        }
+        };
+        Ok(entry)
     }
 }
 
@@ -487,38 +491,47 @@ impl Directory {
         H: io::Seek + io::Read,
     {
         let mut entries = Vec::new();
+        let mut error = None;
         traverser
             .traverse(cluster_index)
             .for_each::<_, ()>(|cluster_data| {
                 Self::raw_entries_to_entries(Self::raw_from_contiguous(cluster_data)).for_each(
-                    |entry| {
-                        entries.push(entry);
+                    |entry_result| match entry_result {
+                        Ok(entry) => entries.push(entry),
+                        Err(e) => error = Some(e),
                     },
                 );
                 None
             })?;
-        Ok(Self { entries })
+        if let Some(e) = error {
+            Err(e)
+        } else {
+            Ok(Self { entries })
+        }
     }
 
-    fn raw_from_contiguous<'a>(raw: &'a [u8]) -> impl 'a + Iterator<Item = RawDirectoryEntry> {
+    fn raw_from_contiguous<'a>(
+        raw: &'a [u8],
+    ) -> impl 'a + Iterator<Item = Result<RawDirectoryEntry, Error>> {
         raw.chunks(DIRECTORY_ENTRY_BYTES as usize)
             .take_while(|raw_entry| raw_entry[0] != END_OF_DIRECTORY_PREFIX)
             .filter(|raw_entry| raw_entry[0] != UNUSED_ENTRY_PREFIX)
             .map(RawDirectoryEntry::parse)
     }
 
-    fn raw_entries_to_entries<I>(iter: I) -> impl Iterator<Item = DirectoryEntry>
+    fn raw_entries_to_entries<I>(iter: I) -> impl Iterator<Item = Result<DirectoryEntry, Error>>
     where
-        I: IntoIterator<Item = RawDirectoryEntry>,
+        I: IntoIterator<Item = Result<RawDirectoryEntry, Error>>,
     {
         let mut name_parts = Vec::new();
         iter.into_iter()
-            .filter_map(move |raw_entry| match raw_entry {
-                RawDirectoryEntry::LongName(long_name_entry) => {
+            .filter_map(move |raw_entry_result| match raw_entry_result {
+                Err(e) => Some(Err(e)),
+                Ok(RawDirectoryEntry::LongName(long_name_entry)) => {
                     name_parts.push(long_name_entry.name);
                     None
                 }
-                RawDirectoryEntry::Normal(normal_entry) => {
+                Ok(RawDirectoryEntry::Normal(normal_entry)) => {
                     let long_name = if name_parts.is_empty() {
                         None
                     } else {
@@ -534,21 +547,23 @@ impl Directory {
                             normal_entry.short_filename_main, normal_entry.short_filename_extension
                         )
                     };
-                    Some(DirectoryEntry {
+                    Some(Ok(DirectoryEntry {
                         short_name,
                         long_name,
                         file_size: normal_entry.file_size,
                         first_cluster: normal_entry.first_cluster,
                         attributes: normal_entry.attributes,
-                    })
+                    }))
                 }
             })
     }
 
-    fn from_contiguous(raw: &[u8]) -> Self {
-        Self {
-            entries: Self::raw_entries_to_entries(Self::raw_from_contiguous(raw)).collect(),
+    fn from_contiguous(raw: &[u8]) -> Result<Self, Error> {
+        let mut entries = Vec::new();
+        for entry_result in Self::raw_entries_to_entries(Self::raw_from_contiguous(raw)) {
+            entries.push(entry_result?);
         }
+        Ok(Self { entries })
     }
 
     pub fn entries(&self) -> &[DirectoryEntry] {
@@ -788,7 +803,7 @@ where
                     self.bpb.root_directory_size(),
                     &mut self.buf,
                 )?;
-                let directory = Directory::from_contiguous(&mut self.buf);
+                let directory = Directory::from_contiguous(&mut self.buf)?;
                 Ok(directory)
             }
         }
