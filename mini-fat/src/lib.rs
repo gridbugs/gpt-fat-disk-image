@@ -379,7 +379,13 @@ struct RawDirectoryEntryNormal {
     short_filename_main: String,
     short_filename_extension: String,
     attributes: u8,
+    creation_time_tenth: u8,
+    creation_time: u16,
+    creation_date: u16,
+    last_accessed_date: u16,
     first_cluster: u32,
+    write_time: u16,
+    write_date: u16,
     file_size: u32,
 }
 
@@ -440,7 +446,16 @@ impl RawDirectoryEntry {
             }
             let short_filename_main = slice_to_string(&raw[0..8]);
             let short_filename_extension = slice_to_string(&raw[8..11]);
+            if raw[12] != 0 {
+                return Err(FatError::UnexpectedNonZero { byte_index: 12 }.into());
+            }
+            let creation_time_tenth = raw[13];
+            let creation_time = u16::from_le_bytes(raw[14..16].try_into().unwrap());
+            let creation_date = u16::from_le_bytes(raw[16..18].try_into().unwrap());
+            let last_accessed_date = u16::from_le_bytes(raw[18..20].try_into().unwrap());
             let first_cluster_hi = u16::from_le_bytes(raw[20..22].try_into().unwrap());
+            let write_time = u16::from_le_bytes(raw[22..24].try_into().unwrap());
+            let write_date = u16::from_le_bytes(raw[24..26].try_into().unwrap());
             let first_cluster_lo = u16::from_le_bytes(raw[26..28].try_into().unwrap());
             let first_cluster = ((first_cluster_hi as u32) << 16) | (first_cluster_lo as u32);
             let file_size = u32::from_le_bytes(raw[28..32].try_into().unwrap());
@@ -448,7 +463,13 @@ impl RawDirectoryEntry {
                 short_filename_main,
                 short_filename_extension,
                 attributes,
+                creation_time_tenth,
+                creation_time,
+                creation_date,
+                last_accessed_date,
                 first_cluster,
+                write_time,
+                write_date,
                 file_size,
             })
         };
